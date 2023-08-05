@@ -20,8 +20,10 @@ import java.nio.ByteBuffer;
 import java.util.List;
 import java.util.concurrent.ConcurrentMap;
 
+import org.apache.rocketmq.common.BoundaryType;
 import org.apache.rocketmq.common.message.MessageExtBrokerInner;
 import org.apache.rocketmq.store.DispatchRequest;
+import org.rocksdb.RocksDBException;
 
 public interface ConsumeQueueStoreInterface {
 
@@ -60,9 +62,9 @@ public interface ConsumeQueueStoreInterface {
 
     /**
      * destroy the specific consumeQueue
-     * @throws Exception only in rocksdb mode
+     * @throws RocksDBException only in rocksdb mode
      */
-    void destroy(ConsumeQueueInterface consumeQueue) throws Exception;
+    void destroy(ConsumeQueueInterface consumeQueue) throws RocksDBException;
 
     /**
      * Flush cache to file.
@@ -116,9 +118,9 @@ public interface ConsumeQueueStoreInterface {
     /**
      * truncate dirty data
      * @param offsetToTruncate
-     * @throws Exception only in rocksdb mode
+     * @throws RocksDBException only in rocksdb mode
      */
-    void truncateDirty(long offsetToTruncate) throws Exception;
+    void truncateDirty(long offsetToTruncate) throws RocksDBException;
 
     /**
      * Apply the dispatched request and build the consume queue. This function should be idempotent.
@@ -132,9 +134,9 @@ public interface ConsumeQueueStoreInterface {
      * Apply the dispatched request. This function should be idempotent.
      *
      * @param request dispatch request
-     * @throws Exception only in rocksdb mode will throw exception
+     * @throws RocksDBException only in rocksdb mode will throw exception
      */
-    void putMessagePositionInfoWrapper(DispatchRequest request) throws Exception;
+    void putMessagePositionInfoWrapper(DispatchRequest request) throws RocksDBException;
 
     /**
      * range query cqUnit(ByteBuffer) in rocksdb
@@ -143,9 +145,9 @@ public interface ConsumeQueueStoreInterface {
      * @param startIndex
      * @param num
      * @return the byteBuffer list of the topic-queueId in rocksdb
-     * @throws Exception only in rocksdb mode
+     * @throws RocksDBException only in rocksdb mode
      */
-    List<ByteBuffer> rangeQuery(final String topic, final int queueId, final long startIndex, final int num) throws Exception;
+    List<ByteBuffer> rangeQuery(final String topic, final int queueId, final long startIndex, final int num) throws RocksDBException;
 
     /**
      * query cqUnit(ByteBuffer) in rocksdb
@@ -153,9 +155,9 @@ public interface ConsumeQueueStoreInterface {
      * @param queueId
      * @param startIndex
      * @return the byteBuffer of the topic-queueId in rocksdb
-     * @throws Exception only in rocksdb mode
+     * @throws RocksDBException only in rocksdb mode
      */
-    ByteBuffer get(final String topic, final int queueId, final long startIndex) throws Exception;
+    ByteBuffer get(final String topic, final int queueId, final long startIndex) throws RocksDBException;
 
     /**
      * get consumeQueue table
@@ -166,9 +168,9 @@ public interface ConsumeQueueStoreInterface {
     /**
      * Assign queue offset.
      * @param msg message itself
-     * @throws Exception only in rocksdb mode
+     * @throws RocksDBException only in rocksdb mode
      */
-    void assignQueueOffset(MessageExtBrokerInner msg) throws Exception;
+    void assignQueueOffset(MessageExtBrokerInner msg) throws RocksDBException;
 
     /**
      * Increase queue offset.
@@ -221,37 +223,37 @@ public interface ConsumeQueueStoreInterface {
     /**
      * get max physic offset in consumeQueue
      * @return the max physic offset in consumeQueue
-     * @throws Exception only in rocksdb mode
+     * @throws RocksDBException only in rocksdb mode
      */
-    long getMaxOffsetInConsumeQueue() throws Exception;
+    long getMaxOffsetInConsumeQueue() throws RocksDBException;
 
     /**
      * get min logic offset of specific topic-queueId in consumeQueue
      * @param topic
      * @param queueId
      * @return the min logic offset of specific topic-queueId in consumeQueue
-     * @throws Exception only in rocksdb mode
+     * @throws RocksDBException only in rocksdb mode
      */
-    long getMinOffsetInQueue(final String topic, final int queueId) throws Exception;
+    long getMinOffsetInQueue(final String topic, final int queueId) throws RocksDBException;
 
     /**
      * get max logic offset of specific topic-queueId in consumeQueue
      * @param topic
      * @param queueId
      * @return the max logic offset of specific topic-queueId in consumeQueue
-     * @throws Exception only in rocksdb mode
+     * @throws RocksDBException only in rocksdb mode
      */
-    long getMaxOffsetInQueue(final String topic, final int queueId) throws Exception;
+    long getMaxOffsetInQueue(final String topic, final int queueId) throws RocksDBException;
 
     /**
-     * Get the message whose timestamp is the smallest, greater than or equal to the given time.
-     * @param topic
-     * @param queueId
-     * @param timestamp timestamp
-     * @return the message's consumeOffset
-     * @throws Exception only in rocksdb mode
+     * Get the message whose timestamp is the smallest, greater than or equal to the given time and when there are more
+     * than one message satisfy the condition, decide which one to return based on boundaryType.
+     * @param timestamp    timestamp
+     * @param boundaryType Lower or Upper
+     * @return the offset(index)
+     * @throws RocksDBException only in rocksdb mode
      */
-    long getOffsetInQueueByTime(String topic, int queueId, long timestamp) throws Exception;
+    long getOffsetInQueueByTime(String topic, int queueId, long timestamp, BoundaryType boundaryType) throws RocksDBException;
 
     /**
      * find or create the consumeQueue

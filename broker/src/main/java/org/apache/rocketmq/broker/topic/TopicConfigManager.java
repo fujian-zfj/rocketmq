@@ -66,14 +66,13 @@ public class TopicConfigManager extends ConfigManager {
     }
 
     public TopicConfigManager(BrokerController brokerController) {
-        this(brokerController, false);
+        this(brokerController, true);
     }
 
-    // isRocksDBConfigManager = true indicates that rocksdb mode is opened
-    public TopicConfigManager(BrokerController brokerController, boolean isRocksDBConfigManager) {
+    public TopicConfigManager(BrokerController brokerController, boolean init) {
         this.brokerController = brokerController;
-        if (!isRocksDBConfigManager) {
-            this.init();
+        if (init) {
+            init();
         }
     }
 

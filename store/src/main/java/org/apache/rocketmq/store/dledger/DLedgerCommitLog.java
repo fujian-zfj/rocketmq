@@ -41,6 +41,7 @@ import org.apache.rocketmq.store.SelectMappedBufferResult;
 import org.apache.rocketmq.store.StoreStatsService;
 import org.apache.rocketmq.store.config.MessageStoreConfig;
 import org.apache.rocketmq.store.logfile.MappedFile;
+import org.rocksdb.RocksDBException;
 
 import io.openmessaging.storage.dledger.AppendFuture;
 import io.openmessaging.storage.dledger.BatchAppendFuture;
@@ -284,7 +285,7 @@ public class DLedgerCommitLog extends CommitLog {
         return false;
     }
 
-    private void recover(long maxPhyOffsetOfConsumeQueue) throws Exception {
+    private void recover(long maxPhyOffsetOfConsumeQueue) throws RocksDBException {
         dLedgerFileStore.load();
         if (dLedgerFileList.getMappedFiles().size() > 0) {
             dLedgerFileStore.recover();
@@ -338,12 +339,12 @@ public class DLedgerCommitLog extends CommitLog {
     }
 
     @Override
-    public void recoverNormally(long maxPhyOffsetOfConsumeQueue) throws Exception {
+    public void recoverNormally(long maxPhyOffsetOfConsumeQueue) throws RocksDBException {
         recover(maxPhyOffsetOfConsumeQueue);
     }
 
     @Override
-    public void recoverAbnormally(long maxPhyOffsetOfConsumeQueue) throws Exception {
+    public void recoverAbnormally(long maxPhyOffsetOfConsumeQueue) throws RocksDBException {
         recover(maxPhyOffsetOfConsumeQueue);
     }
 

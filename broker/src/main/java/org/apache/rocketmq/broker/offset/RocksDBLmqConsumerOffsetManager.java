@@ -14,13 +14,13 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
-package org.apache.rocketmq.broker.subscription;
+package org.apache.rocketmq.broker.offset;
 
 import java.util.HashMap;
 import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
+
 import org.apache.rocketmq.broker.BrokerController;
-import org.apache.rocketmq.broker.offset.RocksDBConsumerOffsetManager;
 import org.apache.rocketmq.common.MixAll;
 import org.apache.rocketmq.remoting.protocol.RemotingSerializable;
 

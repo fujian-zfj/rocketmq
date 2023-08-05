@@ -115,7 +115,7 @@ public class ConfigRocksDBStorage extends AbstractRocksDBStorage {
             open(cfDescriptors, cfHandles);
 
             this.defaultCFHandle = cfHandles.get(0);
-        } catch (final Exception e) {
+        } catch (Exception e) {
             AbstractRocksDBStorage.LOGGER.error("postLoad Failed. {}", this.dbPath, e);
             return false;
         }
@@ -127,8 +127,8 @@ public class ConfigRocksDBStorage extends AbstractRocksDBStorage {
 
     }
 
-    public ColumnFamilyOptions createConfigOptions() {
-        BlockBasedTableConfig tconfig = new BlockBasedTableConfig().
+    private ColumnFamilyOptions createConfigOptions() {
+        BlockBasedTableConfig blockBasedTableConfig = new BlockBasedTableConfig().
             setFormatVersion(5).
             setIndexType(IndexType.kBinarySearch).
             setDataBlockIndexType(DataBlockIndexType.kDataBlockBinarySearch).
@@ -147,7 +147,7 @@ public class ConfigRocksDBStorage extends AbstractRocksDBStorage {
             // MemTable size, memtable(cache) -> immutable memtable(cache) -> sst(disk)
             setWriteBufferSize(8 * SizeUnit.MB).
             setMinWriteBufferNumberToMerge(1).
-            setTableFormatConfig(tconfig).
+            setTableFormatConfig(blockBasedTableConfig).
             setMemTableConfig(new SkipListMemTableConfig()).
             setCompressionType(CompressionType.NO_COMPRESSION).
             setNumLevels(7).
@@ -165,7 +165,7 @@ public class ConfigRocksDBStorage extends AbstractRocksDBStorage {
             setInplaceUpdateSupport(true);
     }
 
-    public DBOptions createConfigDBOptions() {
+    private DBOptions createConfigDBOptions() {
         //Turn based on https://github.com/facebook/rocksdb/wiki/RocksDB-Tuning-Guide
         // and http://gitlab.alibaba-inc.com/aloha/aloha/blob/branch_2_5_0/jstorm-core/src/main/java/com/alibaba/jstorm/cache/rocksdb/RocksDbOptionsFactory.java
         DBOptions options = new DBOptions();
@@ -208,24 +208,23 @@ public class ConfigRocksDBStorage extends AbstractRocksDBStorage {
         return rootPath + File.separator + "rocketmqlogs" + File.separator;
     }
 
-    public void put(final byte[] keyBytes, final int keyLen, final byte[] valueBytes) throws Exception {
+    public void put(final byte[] keyBytes, final int keyLen, final byte[] valueBytes) throws RocksDBException {
         put(this.defaultCFHandle, this.ableWalWriteOptions, keyBytes, keyLen, valueBytes, valueBytes.length);
     }
 
-    public void put(final ByteBuffer keyBB, final ByteBuffer valueBB) throws Exception {
+    public void put(final ByteBuffer keyBB, final ByteBuffer valueBB) throws RocksDBException {
         put(this.defaultCFHandle, this.ableWalWriteOptions, keyBB, valueBB);
     }
 
-    public byte[] get(final byte[] keyBytes) throws Exception {
+    public byte[] get(final byte[] keyBytes) throws RocksDBException {
         return get(this.defaultCFHandle, this.totalOrderReadOptions, keyBytes);
     }
 
-    public void delete(final byte[] keyBytes) throws Exception {
+    public void delete(final byte[] keyBytes) throws RocksDBException {
         delete(this.defaultCFHandle, this.ableWalWriteOptions, keyBytes);
     }
 
-    public List<byte[]> multiGet(final List<ColumnFamilyHandle> cfhList, final List<byte[]> keys) throws
-        RocksDBException {
+    public List<byte[]> multiGet(final List<ColumnFamilyHandle> cfhList, final List<byte[]> keys) throws RocksDBException {
         return multiGet(this.totalOrderReadOptions, cfhList, keys);
     }
 

@@ -57,6 +57,7 @@ import org.apache.rocketmq.store.queue.CqUnit;
 import org.apache.rocketmq.store.stats.BrokerStatsManager;
 import org.apache.rocketmq.store.timer.TimerMessageStore;
 import org.apache.rocketmq.store.util.PerfCounter;
+import org.rocksdb.RocksDBException;
 
 import io.opentelemetry.api.common.AttributesBuilder;
 import io.opentelemetry.api.metrics.Meter;
@@ -258,12 +259,12 @@ public abstract class AbstractPluginMessageStore implements MessageStore {
     }
 
     @Override
-    public int deleteTopics(final Set<String> deleteTopics) throws Exception {
+    public int deleteTopics(final Set<String> deleteTopics) throws RocksDBException {
         return next.deleteTopics(deleteTopics);
     }
 
     @Override
-    public int cleanUnusedTopic(final Set<String> retainTopics) throws Exception {
+    public int cleanUnusedTopic(final Set<String> retainTopics) throws RocksDBException {
         return next.cleanUnusedTopic(retainTopics);
     }
 
@@ -460,7 +461,7 @@ public abstract class AbstractPluginMessageStore implements MessageStore {
     }
 
     @Override
-    public boolean truncateFiles(long offsetToTruncate) throws Exception {
+    public boolean truncateFiles(long offsetToTruncate) throws RocksDBException {
         return next.truncateFiles(offsetToTruncate);
     }
 
@@ -514,7 +515,7 @@ public abstract class AbstractPluginMessageStore implements MessageStore {
 
     @Override
     public void onCommitLogDispatch(DispatchRequest dispatchRequest, boolean doDispatch, MappedFile commitLogFile,
-        boolean isRecover, boolean isFileEnd) throws Exception {
+        boolean isRecover, boolean isFileEnd) throws RocksDBException {
         next.onCommitLogDispatch(dispatchRequest, doDispatch, commitLogFile, isRecover, isFileEnd);
     }
 
@@ -554,7 +555,7 @@ public abstract class AbstractPluginMessageStore implements MessageStore {
     }
 
     @Override
-    public void truncateDirtyLogicFiles(long phyOffset) throws Exception {
+    public void truncateDirtyLogicFiles(long phyOffset) throws RocksDBException {
         next.truncateDirtyLogicFiles(phyOffset);
     }
 
@@ -589,7 +590,7 @@ public abstract class AbstractPluginMessageStore implements MessageStore {
     }
 
     @Override
-    public void assignOffset(MessageExtBrokerInner msg) throws Exception {
+    public void assignOffset(MessageExtBrokerInner msg) throws RocksDBException {
         next.assignOffset(msg);
     }
 

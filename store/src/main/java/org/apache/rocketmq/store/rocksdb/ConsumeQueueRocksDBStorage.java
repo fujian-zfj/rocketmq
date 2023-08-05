@@ -99,11 +99,11 @@ public class ConsumeQueueRocksDBStorage extends AbstractRocksDBStorage {
         this.offsetCFHandle.close();
     }
 
-    public byte[] getCQ(final byte[] keyBytes) throws Exception {
+    public byte[] getCQ(final byte[] keyBytes) throws RocksDBException {
         return get(this.defaultCFHandle, this.totalOrderReadOptions, keyBytes);
     }
 
-    public byte[] getOffset(final byte[] keyBytes) throws Exception {
+    public byte[] getOffset(final byte[] keyBytes) throws RocksDBException {
         return get(this.offsetCFHandle, this.totalOrderReadOptions, keyBytes);
     }
 

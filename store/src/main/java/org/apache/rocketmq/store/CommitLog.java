@@ -60,6 +60,8 @@ import org.apache.rocketmq.store.ha.HAService;
 import org.apache.rocketmq.store.ha.autoswitch.AutoSwitchHAService;
 import org.apache.rocketmq.store.logfile.MappedFile;
 import org.apache.rocketmq.store.util.LibC;
+import org.rocksdb.RocksDBException;
+
 import sun.nio.ch.DirectBuffer;
 
 /**
@@ -299,9 +301,9 @@ public class CommitLog implements Swappable {
 
     /**
      * When the normal exit, data recovery, all memory data have been flush
-     * @throws Exception only in rocksdb mode
+     * @throws RocksDBException only in rocksdb mode
      */
-    public void recoverNormally(long maxPhyOffsetOfConsumeQueue) throws Exception {
+    public void recoverNormally(long maxPhyOffsetOfConsumeQueue) throws RocksDBException {
         boolean checkCRCOnRecover = this.defaultMessageStore.getMessageStoreConfig().isCheckCRCOnRecover();
         boolean checkDupInfo = this.defaultMessageStore.getMessageStoreConfig().isDuplicationEnable();
         final List<MappedFile> mappedFiles = this.mappedFileQueue.getMappedFiles();
@@ -630,9 +632,9 @@ public class CommitLog implements Swappable {
 
     /**
      * When the abnormal exit, data recovery
-     * @throws Exception only in rocksdb mode
+     * @throws RocksDBException only in rocksdb mode
      */
-    public void recoverAbnormally(long maxPhyOffsetOfConsumeQueue) throws Exception {
+    public void recoverAbnormally(long maxPhyOffsetOfConsumeQueue) throws RocksDBException {
         // recover by the minimum time stamp
         boolean checkCRCOnRecover = this.defaultMessageStore.getMessageStoreConfig().isCheckCRCOnRecover();
         boolean checkDupInfo = this.defaultMessageStore.getMessageStoreConfig().isDuplicationEnable();

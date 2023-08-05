@@ -14,7 +14,7 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
-package org.apache.rocketmq.common.rocksdb;
+package org.apache.rocketmq.common.config;
 
 import java.nio.ByteBuffer;
 import java.nio.charset.Charset;
@@ -151,7 +151,7 @@ public abstract class AbstractRocksDBStorage {
 
     protected byte[] get(ColumnFamilyHandle cfHandle, ReadOptions readOptions, byte[] keyBytes) throws RocksDBException {
         if (!hold()) {
-            throw new RocksDBException("rocksDB:" + this + " is not ready");
+            throw new IllegalStateException("rocksDB:" + this + " is not ready");
         }
         try {
             return this.db.get(cfHandle, readOptions, keyBytes);

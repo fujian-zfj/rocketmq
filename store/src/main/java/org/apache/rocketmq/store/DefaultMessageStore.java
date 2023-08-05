@@ -82,6 +82,7 @@ import org.apache.rocketmq.common.topic.TopicValidator;
 import org.apache.rocketmq.common.utils.CleanupPolicyUtils;
 import org.apache.rocketmq.common.utils.QueueTypeUtils;
 import org.apache.rocketmq.common.utils.ServiceProvider;
+import org.apache.rocketmq.common.BoundaryType;
 import org.apache.rocketmq.logging.org.slf4j.Logger;
 import org.apache.rocketmq.logging.org.slf4j.LoggerFactory;
 import org.apache.rocketmq.remoting.protocol.body.HARuntimeInfo;
@@ -110,6 +111,7 @@ import org.apache.rocketmq.store.queue.ReferredIterator;
 import org.apache.rocketmq.store.stats.BrokerStatsManager;
 import org.apache.rocketmq.store.timer.TimerMessageStore;
 import org.apache.rocketmq.store.util.PerfCounter;
+import org.rocksdb.RocksDBException;
 
 public class DefaultMessageStore implements MessageStore {
     protected static final Logger LOGGER = LoggerFactory.getLogger(LoggerName.STORE_LOGGER_NAME);
@@ -323,7 +325,7 @@ public class DefaultMessageStore implements MessageStore {
     }
 
     @Override
-    public void truncateDirtyLogicFiles(long phyOffset) throws Exception {
+    public void truncateDirtyLogicFiles(long phyOffset) throws RocksDBException {
         this.consumeQueueStore.truncateDirty(phyOffset);
     }
 
@@ -535,12 +537,7 @@ public class DefaultMessageStore implements MessageStore {
 
     @Override
     public void destroy() {
-        try {
-            this.destroyLogics();
-        } catch (Exception e) {
-            // only in rocksdb mode
-            LOGGER.error("destroy logic files error!", e);
-        }
+        this.destroyLogics();
         this.commitLog.destroy();
         this.indexService.destroy();
         this.deleteFile(StorePathConfigHelper.getAbortFile(this.messageStoreConfig.getStorePathRootDir()));
@@ -717,7 +714,7 @@ public class DefaultMessageStore implements MessageStore {
         return commitLog;
     }
 
-    public void truncateDirtyFiles(long offsetToTruncate) throws Exception {
+    public void truncateDirtyFiles(long offsetToTruncate) throws RocksDBException {
 
         LOGGER.info("truncate dirty files to {}", offsetToTruncate);
 
@@ -753,7 +750,7 @@ public class DefaultMessageStore implements MessageStore {
     }
 
     @Override
-    public boolean truncateFiles(long offsetToTruncate) throws Exception {
+    public boolean truncateFiles(long offsetToTruncate) throws RocksDBException {
         if (offsetToTruncate >= this.getMaxPhyOffset()) {
             LOGGER.info("no need to truncate files, truncate offset is {}, max physical offset is {}", offsetToTruncate, this.getMaxPhyOffset());
             return true;
@@ -1014,7 +1011,7 @@ public class DefaultMessageStore implements MessageStore {
     public long getMinOffsetInQueue(String topic, int queueId) {
         try {
             return this.consumeQueueStore.getMinOffsetInQueue(topic, queueId);
-        } catch (Exception e) {
+        } catch (RocksDBException e) {
             ERROR_LOG.error("getMinOffsetInQueue Failed. topic: {}, queueId: {}", topic, queueId, e);
             return -1;
         }
@@ -1044,11 +1041,16 @@ public class DefaultMessageStore implements MessageStore {
 
     @Override
     public long getOffsetInQueueByTime(String topic, int queueId, long timestamp) {
+        return this.getOffsetInQueueByTime(topic, queueId, timestamp, BoundaryType.LOWER);
+    }
+
+    @Override
+    public long getOffsetInQueueByTime(String topic, int queueId, long timestamp, BoundaryType boundaryType) {
         try {
-            return this.consumeQueueStore.getOffsetInQueueByTime(topic, queueId, timestamp);
-        } catch (Exception e) {
-            ERROR_LOG.error("getOffsetInQueueByTime Failed. topic: {}, queueId: {}, timestamp: {}, {}",
-                topic, queueId, timestamp, e.getMessage());
+            return this.consumeQueueStore.getOffsetInQueueByTime(topic, queueId, timestamp, boundaryType);
+        } catch (RocksDBException e) {
+            ERROR_LOG.error("getOffsetInQueueByTime Failed. topic: {}, queueId: {}, timestamp: {} boundaryType: {}, {}",
+                topic, queueId, timestamp, boundaryType, e.getMessage());
         }
         return 0;
     }
@@ -1385,10 +1387,10 @@ public class DefaultMessageStore implements MessageStore {
      * If offset table is cleaned, and old messages are dispatching after the old consume queue is cleaned,
      * consume queue will be created with old offset, then later message with new offset table can not be
      * dispatched to consume queue.
-     * @throws Exception only in rocksdb mode
+     * @throws RocksDBException only in rocksdb mode
      */
     @Override
-    public int deleteTopics(final Set<String> deleteTopics) throws Exception {
+    public int deleteTopics(final Set<String> deleteTopics) throws RocksDBException {
         if (deleteTopics == null || deleteTopics.isEmpty()) {
             return 0;
         }
@@ -1433,7 +1435,7 @@ public class DefaultMessageStore implements MessageStore {
     }
 
     @Override
-    public int cleanUnusedTopic(final Set<String> retainTopics) throws Exception {
+    public int cleanUnusedTopic(final Set<String> retainTopics) throws RocksDBException {
         Set<String> consumeQueueTopicSet = this.getConsumeQueueTable().keySet();
         int deleteCount = 0;
         for (String topicName : Sets.difference(consumeQueueTopicSet, retainTopics)) {
@@ -1886,7 +1888,7 @@ public class DefaultMessageStore implements MessageStore {
         return this.brokerConfig.isRecoverConcurrently() && !StoreType.DEFAULT_ROCKSDB.getStoreType().equals(this.messageStoreConfig.getStoreType());
     }
 
-    private void recover(final boolean lastExitOK) throws Exception {
+    private void recover(final boolean lastExitOK) throws RocksDBException {
         boolean recoverConcurrently = this.isRecoverConcurrently();
         LOGGER.info("message store recover mode: {}", recoverConcurrently ? "concurrent" : "normal");
 
@@ -1946,7 +1948,7 @@ public class DefaultMessageStore implements MessageStore {
         }
     }
 
-    private long getMaxOffsetInConsumeQueue() throws Exception {
+    private long getMaxOffsetInConsumeQueue() throws RocksDBException {
         return this.consumeQueueStore.getMaxOffsetInConsumeQueue();
     }
 
@@ -1989,7 +1991,7 @@ public class DefaultMessageStore implements MessageStore {
         return runningFlags;
     }
 
-    public void doDispatch(DispatchRequest req) throws Exception {
+    public void doDispatch(DispatchRequest req) throws RocksDBException {
         for (CommitLogDispatcher dispatcher : this.dispatcherList) {
             dispatcher.dispatch(req);
         }
@@ -1997,9 +1999,9 @@ public class DefaultMessageStore implements MessageStore {
 
     /**
      * @param dispatchRequest
-     * @throws Exception only in rocksdb mode
+     * @throws RocksDBException only in rocksdb mode
      */
-    protected void putMessagePositionInfo(DispatchRequest dispatchRequest) throws Exception {
+    protected void putMessagePositionInfo(DispatchRequest dispatchRequest) throws RocksDBException {
         this.consumeQueueStore.putMessagePositionInfoWrapper(dispatchRequest);
     }
 
@@ -2106,7 +2108,7 @@ public class DefaultMessageStore implements MessageStore {
 
     @Override
     public void onCommitLogDispatch(DispatchRequest dispatchRequest, boolean doDispatch, MappedFile commitLogFile,
-        boolean isRecover, boolean isFileEnd) throws Exception {
+        boolean isRecover, boolean isFileEnd) throws RocksDBException {
         if (doDispatch && !isFileEnd) {
             this.doDispatch(dispatchRequest);
         }
@@ -2123,7 +2125,7 @@ public class DefaultMessageStore implements MessageStore {
     }
 
     @Override
-    public void assignOffset(MessageExtBrokerInner msg) throws Exception {
+    public void assignOffset(MessageExtBrokerInner msg) throws RocksDBException {
         final int tranType = MessageSysFlag.getTransactionValue(msg.getSysFlag());
 
         if (tranType == MessageSysFlag.TRANSACTION_NOT_TYPE || tranType == MessageSysFlag.TRANSACTION_COMMIT_TYPE) {
@@ -2168,7 +2170,7 @@ public class DefaultMessageStore implements MessageStore {
     class CommitLogDispatcherBuildConsumeQueue implements CommitLogDispatcher {
 
         @Override
-        public void dispatch(DispatchRequest request) throws Exception {
+        public void dispatch(DispatchRequest request) throws RocksDBException {
             final int tranType = MessageSysFlag.getTransactionValue(request.getSysFlag());
             switch (tranType) {
                 case MessageSysFlag.TRANSACTION_NOT_TYPE:

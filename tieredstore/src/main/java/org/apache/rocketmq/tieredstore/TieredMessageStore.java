@@ -21,9 +21,11 @@ import java.util.Set;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.TimeUnit;
 import java.util.function.Supplier;
+
 import com.google.common.base.Stopwatch;
 
 import org.apache.commons.lang3.StringUtils;
+import org.apache.rocketmq.common.BoundaryType;
 import org.apache.rocketmq.common.MixAll;
 import org.apache.rocketmq.common.Pair;
 import org.apache.rocketmq.common.PopAckConstants;
@@ -41,7 +43,6 @@ import org.apache.rocketmq.store.QueryMessageResult;
 import org.apache.rocketmq.store.SelectMappedBufferResult;
 import org.apache.rocketmq.store.plugin.AbstractPluginMessageStore;
 import org.apache.rocketmq.store.plugin.MessageStorePluginContext;
-import org.apache.rocketmq.tieredstore.common.BoundaryType;
 import org.apache.rocketmq.tieredstore.common.TieredMessageStoreConfig;
 import org.apache.rocketmq.tieredstore.common.TieredStoreExecutor;
 import org.apache.rocketmq.tieredstore.file.CompositeFlatFile;
@@ -50,6 +51,7 @@ import org.apache.rocketmq.tieredstore.metadata.TieredMetadataStore;
 import org.apache.rocketmq.tieredstore.metrics.TieredStoreMetricsConstant;
 import org.apache.rocketmq.tieredstore.metrics.TieredStoreMetricsManager;
 import org.apache.rocketmq.tieredstore.util.TieredStoreUtil;
+import org.rocksdb.RocksDBException;
 
 import io.opentelemetry.api.common.Attributes;
 import io.opentelemetry.api.common.AttributesBuilder;
@@ -289,6 +291,7 @@ public class TieredMessageStore extends AbstractPluginMessageStore {
         return getOffsetInQueueByTime(topic, queueId, timestamp, BoundaryType.LOWER);
     }
 
+    @Override
     public long getOffsetInQueueByTime(String topic, int queueId, long timestamp, BoundaryType boundaryType) {
         long earliestTimeInNextStore = next.getEarliestMessageTime();
         if (earliestTimeInNextStore <= 0) {
@@ -387,7 +390,7 @@ public class TieredMessageStore extends AbstractPluginMessageStore {
     }
 
     @Override
-    public int cleanUnusedTopic(Set<String> retainTopics) throws Exception {
+    public int cleanUnusedTopic(Set<String> retainTopics) throws RocksDBException {
         try {
             metadataStore.iterateTopic(topicMetadata -> {
                 String topic = topicMetadata.getTopic();
@@ -405,7 +408,7 @@ public class TieredMessageStore extends AbstractPluginMessageStore {
     }
 
     @Override
-    public int deleteTopics(Set<String> deleteTopics) throws Exception {
+    public int deleteTopics(Set<String> deleteTopics) throws RocksDBException {
         for (String topic : deleteTopics) {
             this.destroyCompositeFlatFile(topic);
         }

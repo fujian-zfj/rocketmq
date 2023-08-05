@@ -24,6 +24,7 @@ import java.util.Set;
 import java.util.concurrent.CompletableFuture;
 import java.util.function.Supplier;
 
+import org.apache.rocketmq.common.BoundaryType;
 import org.apache.rocketmq.common.Pair;
 import org.apache.rocketmq.common.SystemClock;
 import org.apache.rocketmq.common.message.MessageExt;
@@ -41,6 +42,7 @@ import org.apache.rocketmq.store.queue.CqUnit;
 import org.apache.rocketmq.store.stats.BrokerStatsManager;
 import org.apache.rocketmq.store.timer.TimerMessageStore;
 import org.apache.rocketmq.store.util.PerfCounter;
+import org.rocksdb.RocksDBException;
 
 import io.opentelemetry.api.common.AttributesBuilder;
 import io.opentelemetry.api.metrics.Meter;
@@ -226,6 +228,17 @@ public interface MessageStore {
      * @return physical offset which matches.
      */
     long getOffsetInQueueByTime(final String topic, final int queueId, final long timestamp);
+
+    /**
+     * Look up the physical offset of the message whose store timestamp is as specified with specific boundaryType.
+     *
+     * @param topic        Topic of the message.
+     * @param queueId      Queue ID.
+     * @param timestamp    Timestamp to look up.
+     * @param boundaryType Lower or Upper
+     * @return physical offset which matches.
+     */
+    long getOffsetInQueueByTime(final String topic, final int queueId, final long timestamp, final BoundaryType boundaryType);
 
     /**
      * Look up the message by given commit log offset.
@@ -444,17 +457,18 @@ public interface MessageStore {
      *
      * @param deleteTopics unused topic name set
      * @return the number of the topics which has been deleted.
-     * @throws Exception only in rocksdb mode
+     * @throws RocksDBException only in rocksdb mode
      */
-    int deleteTopics(final Set<String> deleteTopics) throws Exception;
+    int deleteTopics(final Set<String> deleteTopics) throws RocksDBException;
 
     /**
      * Clean unused topics which not in retain topic name set.
      *
      * @param retainTopics all valid topics.
      * @return number of the topics deleted.
+     * @throws RocksDBException
      */
-    int cleanUnusedTopic(final Set<String> retainTopics) throws Exception;
+    int cleanUnusedTopic(final Set<String> retainTopics) throws RocksDBException;
 
     /**
      * Clean expired consume queues.
@@ -612,10 +626,10 @@ public interface MessageStore {
      * @param commitLogFile   commit log file
      * @param isRecover       is from recover process
      * @param isFileEnd       if the dispatch request represents 'file end'
-     * @throws Exception      only in rocksdb mode
+     * @throws RocksDBException      only in rocksdb mode
      */
     void onCommitLogDispatch(DispatchRequest dispatchRequest, boolean doDispatch, MappedFile commitLogFile,
-        boolean isRecover, boolean isFileEnd) throws Exception;
+        boolean isRecover, boolean isFileEnd) throws RocksDBException;
 
     /**
      * Only used in rocksdb mode, because we build consumeQueue in batch(default 16 dispatchRequests)
@@ -692,9 +706,9 @@ public interface MessageStore {
      * Truncate dirty logic files
      *
      * @param phyOffset physical offset
-     * @throws Exception only in rocksdb mode
+     * @throws RocksDBException only in rocksdb mode
      */
-    void truncateDirtyLogicFiles(long phyOffset) throws Exception;
+    void truncateDirtyLogicFiles(long phyOffset) throws RocksDBException;
 
     /**
      * Destroy logics files
@@ -746,8 +760,9 @@ public interface MessageStore {
      * yourself.
      *
      * @param msg        message
+     * @throws RocksDBException
      */
-    void assignOffset(MessageExtBrokerInner msg) throws Exception;
+    void assignOffset(MessageExtBrokerInner msg) throws RocksDBException;
 
     /**
      * Increase queue offset in memory table. If there is a race condition, you need to lock/unlock this method
@@ -842,9 +857,9 @@ public interface MessageStore {
      *
      * @param offsetToTruncate offset to truncate
      * @return true if truncate succeed, false otherwise
-     * @throws Exception only in rocksdb mode
+     * @throws RocksDBException only in rocksdb mode
      */
-    boolean truncateFiles(long offsetToTruncate) throws Exception;
+    boolean truncateFiles(long offsetToTruncate) throws RocksDBException;
 
     /**
      * Check if the offset is aligned with one message.

@@ -138,6 +138,7 @@
         <jul-to-slf4j.version>2.0.6</jul-to-slf4j.version>
         <rocksdb.version>1.0.3</rocksdb.version>
         <s3.version>2.20.29</s3.version>
+        <rocksdb.version>1.0.3</rocksdb.version>
         <jackson-databind.version>2.13.4.2</jackson-databind.version>
 
         <!-- Test dependencies -->
@@ -711,6 +712,11 @@
                 <groupId>org.slf4j</groupId>
                 <artifactId>slf4j-api</artifactId>
                 <version>${slf4j-api.version}</version>
+            </dependency>
+            <dependency>
+                <groupId>io.github.aliyunmq</groupId>
+                <artifactId>rocketmq-rocksdb</artifactId>
+                <version>${rocksdb.version}</version>
             </dependency>
             <dependency>
                 <groupId>io.github.aliyunmq</groupId>

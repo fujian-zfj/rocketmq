@@ -26,6 +26,7 @@ import org.apache.rocketmq.logging.org.slf4j.LoggerFactory;
 import org.apache.rocketmq.store.DefaultMessageStore;
 import org.apache.rocketmq.store.DispatchRequest;
 import org.apache.rocketmq.store.config.MessageStoreConfig;
+import org.rocksdb.RocksDBException;
 
 public abstract class AbstractConsumeQueueStore implements ConsumeQueueStoreInterface {
     protected static final Logger log = LoggerFactory.getLogger(LoggerName.STORE_LOGGER_NAME);
@@ -63,7 +64,7 @@ public abstract class AbstractConsumeQueueStore implements ConsumeQueueStoreInte
     }
 
     @Override
-    public void assignQueueOffset(MessageExtBrokerInner msg) throws Exception {
+    public void assignQueueOffset(MessageExtBrokerInner msg) throws RocksDBException {
         ConsumeQueueInterface consumeQueue = findOrCreateConsumeQueue(msg.getTopic(), msg.getQueueId());
         consumeQueue.assignQueueOffset(this.queueOffsetOperator, msg);
     }

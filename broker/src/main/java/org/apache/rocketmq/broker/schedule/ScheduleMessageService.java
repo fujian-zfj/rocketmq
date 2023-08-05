@@ -92,7 +92,7 @@ public class ScheduleMessageService extends ConfigManager {
         this.brokerController = brokerController;
         this.enableAsyncDeliver = brokerController.getMessageStoreConfig().isEnableScheduleAsyncDeliver();
         scheduledPersistService = new ScheduledThreadPoolExecutor(1,
-                new ThreadFactoryImpl("ScheduleMessageServicePersistThread", true, brokerController.getBrokerConfig()));
+            new ThreadFactoryImpl("ScheduleMessageServicePersistThread", true, brokerController.getBrokerConfig()));
     }
 
     public static int queueId2DelayLevel(final int queueId) {
@@ -222,6 +222,12 @@ public class ScheduleMessageService extends ConfigManager {
         boolean result = super.load();
         result = result && this.parseDelayLevel();
         result = result && this.correctDelayOffset();
+        return result;
+    }
+    
+    public boolean loadWhenSyncDelayOffset() {
+        boolean result = super.load();
+        result = result && this.parseDelayLevel();
         return result;
     }
 

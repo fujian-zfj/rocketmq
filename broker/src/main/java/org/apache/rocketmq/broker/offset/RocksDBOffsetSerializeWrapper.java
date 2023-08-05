@@ -14,38 +14,21 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
-package org.apache.rocketmq.tieredstore.common;
+package org.apache.rocketmq.broker.offset;
 
-/**
- *  This enumeration represents the boundary types.
- *  It has two constants, lower and upper, which represent the lower and upper boundaries respectively.
- */
-public enum BoundaryType {
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.ConcurrentMap;
 
-    /**
-     * Represents the lower boundary.
-     */
-    LOWER("lower"),
+import org.apache.rocketmq.remoting.protocol.RemotingSerializable;
 
-    /**
-     * Represents the upper boundary.
-     */
-    UPPER("upper");
+public class RocksDBOffsetSerializeWrapper extends RemotingSerializable {
+    private ConcurrentMap<Integer, Long> offsetTable = new ConcurrentHashMap(16);
 
-    private final String name;
-
-    BoundaryType(String name) {
-        this.name = name;
+    public ConcurrentMap<Integer, Long> getOffsetTable() {
+        return offsetTable;
     }
 
-    public String getName() {
-        return name;
-    }
-
-    public static BoundaryType getType(String name) {
-        if (BoundaryType.UPPER.getName().equalsIgnoreCase(name)) {
-            return UPPER;
-        }
-        return LOWER;
+    public void setOffsetTable(ConcurrentMap<Integer, Long> offsetTable) {
+        this.offsetTable = offsetTable;
     }
 }

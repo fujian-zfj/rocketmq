@@ -51,7 +51,6 @@ public class Consumer {
          * }
          * </pre>
          */
-        // Uncomment the following line while debugging, namesrvAddr should be set to your local address
         consumer.setNamesrvAddr(DEFAULT_NAMESRVADDR);
 
         /*

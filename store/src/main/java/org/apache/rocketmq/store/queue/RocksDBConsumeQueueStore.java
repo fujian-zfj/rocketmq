@@ -34,6 +34,7 @@ import java.util.concurrent.TimeUnit;
 
 import org.apache.commons.io.FileUtils;
 import org.apache.commons.lang3.StringUtils;
+import org.apache.rocketmq.common.BoundaryType;
 import org.apache.rocketmq.common.Pair;
 import org.apache.rocketmq.common.ThreadFactoryImpl;
 import org.apache.rocketmq.common.TopicConfig;
@@ -226,7 +227,7 @@ public class RocksDBConsumeQueueStore extends AbstractConsumeQueueStore {
     }
 
     @Override
-    public void putMessagePositionInfoWrapper(DispatchRequest request) throws Exception {
+    public void putMessagePositionInfoWrapper(DispatchRequest request) throws RocksDBException {
         if (request == null || this.bufferDRList.size() >= BATCH_SIZE) {
             putMessagePosition();
         }
@@ -235,7 +236,7 @@ public class RocksDBConsumeQueueStore extends AbstractConsumeQueueStore {
         }
     }
 
-    public void putMessagePosition() throws Exception {
+    public void putMessagePosition() throws RocksDBException {
         final int maxRetries = 30;
         for (int i = 0; i < maxRetries; i++) {
             if (putMessagePosition0()) {
@@ -257,7 +258,7 @@ public class RocksDBConsumeQueueStore extends AbstractConsumeQueueStore {
             this.messageStore.getRunningFlags().makeLogicsQueueError();
             this.isCQError = true;
         }
-        throw new Exception("put CQ Failed");
+        throw new RocksDBException("put CQ Failed");
     }
 
     private boolean putMessagePosition0() {
@@ -387,7 +388,7 @@ public class RocksDBConsumeQueueStore extends AbstractConsumeQueueStore {
         writeBatch.put(cfh, INNER_CHECKPOINT_TOPIC, maxPhyOffsetBB);
     }
 
-    public List<ByteBuffer> rangeQuery(final String topic, final int queueId, final long startIndex, final int num) throws Exception {
+    public List<ByteBuffer> rangeQuery(final String topic, final int queueId, final long startIndex, final int num) throws RocksDBException {
         final byte[] topicBytes = topic.getBytes(CHARSET_UTF8);
         final List<ColumnFamilyHandle> defaultCFHList = new ArrayList(num);
         final ColumnFamilyHandle defaultCFH = this.rocksDBStorage.getDefaultCFHandle();
@@ -410,7 +411,7 @@ public class RocksDBConsumeQueueStore extends AbstractConsumeQueueStore {
             List<byte[]> kvValueList = this.rocksDBStorage.multiGet(defaultCFHList, kvKeyList);
             final int valueNum = kvValueList.size();
             if (keyNum != valueNum) {
-                throw new Exception("rocksdb bug, multiGet");
+                throw new RocksDBException("rocksdb bug, multiGet");
             }
             for (int i = 0; i < valueNum; i++) {
                 byte[] value = kvValueList.get(i);
@@ -432,7 +433,7 @@ public class RocksDBConsumeQueueStore extends AbstractConsumeQueueStore {
             }
             long queueOffset = byteBuffer.getLong(CQ_OFFSET_OFFSET);
             if (i > 0 && queueOffset != preQueueOffset + 1) {
-                throw new Exception("rocksdb bug, data damaged");
+                throw new RocksDBException("rocksdb bug, data damaged");
             }
             preQueueOffset = queueOffset;
             bbValueList.add(byteBuffer);
@@ -441,7 +442,7 @@ public class RocksDBConsumeQueueStore extends AbstractConsumeQueueStore {
     }
 
     @Override
-    public ByteBuffer get(final String topic, final int queueId, final long cqOffset) throws Exception {
+    public ByteBuffer get(final String topic, final int queueId, final long cqOffset) throws RocksDBException {
         final ByteBuffer valueBB = getCache(topic, queueId, cqOffset);
         if (valueBB != null) {
             return valueBB;
@@ -505,7 +506,7 @@ public class RocksDBConsumeQueueStore extends AbstractConsumeQueueStore {
     }
 
     @Override
-    public void destroy(ConsumeQueueInterface consumeQueue) throws Exception {
+    public void destroy(ConsumeQueueInterface consumeQueue) throws RocksDBException {
         String topic = consumeQueue.getTopic();
         int queueId = consumeQueue.getQueueId();
         if (StringUtils.isEmpty(topic) || queueId < 0 || !this.rocksDBStorage.hold()) {
@@ -538,7 +539,7 @@ public class RocksDBConsumeQueueStore extends AbstractConsumeQueueStore {
             String topicQueueId = buildTopicQueueId(topic, queueId);
             removeHeapMinCqOffset(topicQueueId);
             removeHeapMaxCqOffset(topicQueueId);
-        } catch (Exception e) {
+        } catch (RocksDBException e) {
             ERROR_LOG.error("kv deleteTopic {} Failed.", topic, e);
             throw e;
         } finally {
@@ -563,7 +564,7 @@ public class RocksDBConsumeQueueStore extends AbstractConsumeQueueStore {
     }
 
     @Override
-    public void truncateDirty(long offsetToTruncate) throws Exception {
+    public void truncateDirty(long offsetToTruncate) throws RocksDBException {
         long cqMaxPhyOffset = getMaxOffsetInConsumeQueue();
         if (offsetToTruncate >= cqMaxPhyOffset) {
             return;
@@ -583,7 +584,7 @@ public class RocksDBConsumeQueueStore extends AbstractConsumeQueueStore {
         }
     }
 
-    public void correctMaxPyhOffset(long maxPhyOffset) throws Exception {
+    public void correctMaxPyhOffset(long maxPhyOffset) throws RocksDBException {
         if (!this.rocksDBStorage.hold()) {
             return;
         }
@@ -596,7 +597,7 @@ public class RocksDBConsumeQueueStore extends AbstractConsumeQueueStore {
             final ColumnFamilyHandle offsetCFH = this.rocksDBStorage.getOffsetCFHandle();
             appendMaxPhyOffset(writeBatch, offsetCFH, maxPhyOffset);
             this.rocksDBStorage.batchPut(writeBatch);
-        } catch (Exception e) {
+        } catch (RocksDBException e) {
             ERROR_LOG.error("correctMaxPyhOffset Failed.", e);
             throw e;
         } finally {
@@ -604,7 +605,7 @@ public class RocksDBConsumeQueueStore extends AbstractConsumeQueueStore {
         }
     }
 
-    public void correctQueueMaxOffsetMap(List<DispatchRequest> dispatchRequestList) throws Exception {
+    public void correctQueueMaxOffsetMap(List<DispatchRequest> dispatchRequestList) throws RocksDBException {
         if (!this.rocksDBStorage.hold()) {
             return;
         }
@@ -642,7 +643,7 @@ public class RocksDBConsumeQueueStore extends AbstractConsumeQueueStore {
 
             this.rocksDBStorage.batchPut(writeBatch);
             updateTopicQueueMaxCqOffset(tempTopicQueueMaxOffsetMap);
-        } catch (Exception e) {
+        } catch (RocksDBException e) {
             ERROR_LOG.error("correctQueueMaxOffsetMap Failed.", e);
             throw e;
         } finally {
@@ -657,7 +658,7 @@ public class RocksDBConsumeQueueStore extends AbstractConsumeQueueStore {
     }
 
     @Override
-    public long getOffsetInQueueByTime(String topic, int queueId, long timestamp) throws Exception {
+    public long getOffsetInQueueByTime(String topic, int queueId, long timestamp, BoundaryType boundaryType) throws RocksDBException {
         long offset = 0;
         final long minPhysicOffset = this.messageStore.getMinPhyOffset();
         long low = getMinOffsetInQueue(topic, queueId);
@@ -713,7 +714,7 @@ public class RocksDBConsumeQueueStore extends AbstractConsumeQueueStore {
         return offset;
     }
 
-    private byte[] getOffsetInKV(String topic, int queueId, boolean max) throws Exception {
+    private byte[] getOffsetInKV(String topic, int queueId, boolean max) throws RocksDBException {
         final byte[] topicBytes = topic.getBytes(CHARSET_UTF8);
         final ByteBuffer keyBB = buildOffsetKeyBB(topicBytes, queueId, max);
 
@@ -760,7 +761,7 @@ public class RocksDBConsumeQueueStore extends AbstractConsumeQueueStore {
         bb.flip();
     }
 
-    private void truncateDirtyLogicFile(String topic, int queueId) throws Exception {
+    private void truncateDirtyLogicFile(String topic, int queueId) throws RocksDBException {
         final ByteBuffer byteBuffer = getMaxCQInKV(topic, queueId);
         if (byteBuffer == null) {
             return;
@@ -778,12 +779,12 @@ public class RocksDBConsumeQueueStore extends AbstractConsumeQueueStore {
     }
 
     @Override
-    public long getMaxOffsetInQueue(String topic, int queueId) throws Exception {
+    public long getMaxOffsetInQueue(String topic, int queueId) throws RocksDBException {
         Long maxOffset = getMaxOffsetInQueue0(topic, queueId);
         return (maxOffset != null) ? maxOffset + 1 : 0;
     }
 
-    private Long getMaxOffsetInQueue0(String topic, int queueId) throws Exception {
+    private Long getMaxOffsetInQueue0(String topic, int queueId) throws RocksDBException {
         Long maxCqOffset = getHeapMaxCqOffset(topic, queueId);
 
         if (maxCqOffset == null) {
@@ -800,7 +801,7 @@ public class RocksDBConsumeQueueStore extends AbstractConsumeQueueStore {
     }
 
     @Override
-    public long getMinOffsetInQueue(String topic, int queueId) throws Exception {
+    public long getMinOffsetInQueue(String topic, int queueId) throws RocksDBException {
         final long minPhyOffset = this.messageStore.getMinPhyOffset();
         Pair<Boolean, Long> pair = isMinOffsetOk(topic, queueId, minPhyOffset);
         final long cqOffset = pair.getObject2();
@@ -817,7 +818,7 @@ public class RocksDBConsumeQueueStore extends AbstractConsumeQueueStore {
         return cqOffset;
     }
 
-    private Pair<Boolean, Long> isMinOffsetOk(final String topic, final int queueId, final long minPhyOffset) throws Exception {
+    private Pair<Boolean, Long> isMinOffsetOk(final String topic, final int queueId, final long minPhyOffset) throws RocksDBException {
         PhyAndCQOffset phyAndCQOffset = getHeapMinCqOffset(topic, queueId);
         if (phyAndCQOffset != null) {
             final long phyOffset = phyAndCQOffset.getPhyOffset();
@@ -845,7 +846,7 @@ public class RocksDBConsumeQueueStore extends AbstractConsumeQueueStore {
     }
 
     private boolean correctMaxCQOffset(final String topic, final int queueId, final long maxCQOffset,
-        final long maxPhyOffsetInCQ) throws Exception {
+        final long maxPhyOffsetInCQ) throws RocksDBException {
         // 'getMinOffsetInQueue' may correct minCqOffset and put it into heap
         long minCQOffset = getMinOffsetInQueue(topic, queueId);
         PhyAndCQOffset minPhyAndCQOffset = getHeapMinCqOffset(topic, queueId);
@@ -877,7 +878,7 @@ public class RocksDBConsumeQueueStore extends AbstractConsumeQueueStore {
     }
 
     private boolean correctMinCQOffset(final String topic, final int queueId,
-        final long minCQOffset, final long minPhyOffset) throws Exception {
+        final long minCQOffset, final long minPhyOffset) throws RocksDBException {
         final ByteBuffer maxBB = getMaxCQInKV(topic, queueId);
         if (maxBB == null) {
             updateTopicQueueMinOffset(topic, queueId, minPhyOffset, 0L);
@@ -911,7 +912,7 @@ public class RocksDBConsumeQueueStore extends AbstractConsumeQueueStore {
         }
     }
 
-    private PhyAndCQOffset binarySearchInCQ(String topic, int queueId, long high, long low, long targetPhyOffset, boolean min) throws Exception {
+    private PhyAndCQOffset binarySearchInCQ(String topic, int queueId, long high, long low, long targetPhyOffset, boolean min) throws RocksDBException {
         long resultCQOffset = -1L;
         long resultPhyOffset = -1L;
         while (high >= low) {
@@ -950,7 +951,7 @@ public class RocksDBConsumeQueueStore extends AbstractConsumeQueueStore {
     }
 
     private void updateTopicQueueMinOffset(final String topic, final int queueId,
-        final long minPhyOffset, final long minCQOffset) throws Exception {
+        final long minPhyOffset, final long minCQOffset) throws RocksDBException {
         if (!this.rocksDBStorage.hold()) {
             return;
         }
@@ -966,7 +967,7 @@ public class RocksDBConsumeQueueStore extends AbstractConsumeQueueStore {
             this.rocksDBStorage.batchPut(writeBatch);
 
             putHeapMinCqOffset(topic, queueId, minPhyOffset, minCQOffset);
-        } catch (Exception e) {
+        } catch (RocksDBException e) {
             ERROR_LOG.error("updateMinOffset Failed.", e);
             throw e;
         } finally {
@@ -979,7 +980,7 @@ public class RocksDBConsumeQueueStore extends AbstractConsumeQueueStore {
     }
 
     private void updateTopicQueueMaxOffset(final String topic, final int queueId,
-        final long maxPhyOffset, final long maxCQOffset) throws Exception {
+        final long maxPhyOffset, final long maxCQOffset) throws RocksDBException {
         if (!this.rocksDBStorage.hold()) {
             return;
         }
@@ -995,7 +996,7 @@ public class RocksDBConsumeQueueStore extends AbstractConsumeQueueStore {
             this.rocksDBStorage.batchPut(writeBatch);
 
             putHeapMaxCqOffset(topic, queueId, maxCQOffset);
-        } catch (Exception e) {
+        } catch (RocksDBException e) {
             ERROR_LOG.error("updateMaxOffset Failed.", e);
             throw e;
         } finally {
@@ -1007,12 +1008,12 @@ public class RocksDBConsumeQueueStore extends AbstractConsumeQueueStore {
         }
     }
 
-    private ByteBuffer getMaxCQInKV(String topic, int queueId) throws Exception {
+    private ByteBuffer getMaxCQInKV(String topic, int queueId) throws RocksDBException {
         byte[] value = getOffsetInKV(topic, queueId, true);
         return (value != null) ? ByteBuffer.wrap(value) : null;
     }
 
-    private ByteBuffer getMinCQInKV(String topic, int queueId) throws Exception {
+    private ByteBuffer getMinCQInKV(String topic, int queueId) throws RocksDBException {
         byte[] value = getOffsetInKV(topic, queueId, false);
         return (value != null) ? ByteBuffer.wrap(value) : null;
     }
@@ -1075,7 +1076,7 @@ public class RocksDBConsumeQueueStore extends AbstractConsumeQueueStore {
     }
 
     @Override
-    public long getMaxOffsetInConsumeQueue() throws Exception {
+    public long getMaxOffsetInConsumeQueue() throws RocksDBException {
         INNER_CHECKPOINT_TOPIC.position(0).limit(INNER_CHECKPOINT_TOPIC_LEN);
         byte[] keyBytes = new byte[INNER_CHECKPOINT_TOPIC_LEN];
         INNER_CHECKPOINT_TOPIC.get(keyBytes);

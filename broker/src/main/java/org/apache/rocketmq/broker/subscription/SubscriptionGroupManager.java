@@ -56,14 +56,13 @@ public class SubscriptionGroupManager extends ConfigManager {
     }
 
     public SubscriptionGroupManager(BrokerController brokerController) {
-        this(brokerController, false);
-
+        this(brokerController, true);
     }
 
-    public SubscriptionGroupManager(BrokerController brokerController, boolean isRocksDBConfigManager) {
+    public SubscriptionGroupManager(BrokerController brokerController, boolean init) {
         this.brokerController = brokerController;
-        if (!isRocksDBConfigManager) {
-            this.init();
+        if (init) {
+            init();
         }
     }
 

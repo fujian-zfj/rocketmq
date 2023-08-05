@@ -35,6 +35,7 @@ import java.util.concurrent.LinkedBlockingQueue;
 import java.util.concurrent.ThreadPoolExecutor;
 import java.util.concurrent.TimeUnit;
 
+import org.apache.rocketmq.common.BoundaryType;
 import org.apache.rocketmq.common.ThreadFactoryImpl;
 import org.apache.rocketmq.common.TopicConfig;
 import org.apache.rocketmq.common.attribute.CQType;
@@ -168,10 +169,10 @@ public class ConsumeQueueStore extends AbstractConsumeQueueStore {
     }
 
     @Override
-    public long getOffsetInQueueByTime(String topic, int queueId, long timestamp) {
+    public long getOffsetInQueueByTime(String topic, int queueId, long timestamp, BoundaryType boundaryType) {
         ConsumeQueueInterface logic = findOrCreateConsumeQueue(topic, queueId);
         if (logic != null) {
-            long resultOffset = logic.getOffsetInQueueByTime(timestamp);
+            long resultOffset = logic.getOffsetInQueueByTime(timestamp, boundaryType);
             // Make sure the result offset is in valid range.
             resultOffset = Math.max(resultOffset, logic.getMinOffsetInQueue());
             resultOffset = Math.min(resultOffset, logic.getMaxOffsetInQueue());

@@ -27,6 +27,7 @@ import org.apache.rocketmq.store.config.StorePathConfigHelper;
 import org.apache.rocketmq.store.queue.ConsumeQueueStoreInterface;
 import org.apache.rocketmq.store.queue.RocksDBConsumeQueueStore;
 import org.apache.rocketmq.store.stats.BrokerStatsManager;
+import org.rocksdb.RocksDBException;
 
 public class RocksDBMessageStore extends DefaultMessageStore {
 
@@ -77,7 +78,7 @@ public class RocksDBMessageStore extends DefaultMessageStore {
     public void finishCommitLogDispatch() {
         try {
             putMessagePositionInfo(null);
-        } catch (Exception e) {
+        } catch (RocksDBException e) {
             ERROR_LOG.info("try to finish commitlog dispatch error.", e);
         }
     }
