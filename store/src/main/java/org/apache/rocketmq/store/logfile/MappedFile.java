@@ -368,4 +368,11 @@ public interface MappedFile {
      * @return data is resided in memory or not
      */
     boolean isLoaded(long position, int size);
+
+    /**
+     * After restarting, broker will load commitlog to mappedFile. Although transientPool is enabled,
+     * the last mappedFile will not initialize writeBuffer.
+     * @param transientStorePool transient store pool
+     */
+    void setWriteBuffer4LastCommitLogAfterRestart(final TransientStorePool transientStorePool);
 }

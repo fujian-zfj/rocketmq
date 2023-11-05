@@ -157,8 +157,16 @@ public class CommitLog implements Swappable {
 
     public boolean load() {
         boolean result = this.mappedFileQueue.load();
-        if (result && !defaultMessageStore.getMessageStoreConfig().isDataReadAheadEnable()) {
-            scanFileAndSetReadMode(LibC.MADV_RANDOM);
+        if (result) {
+            if (!defaultMessageStore.getMessageStoreConfig().isDataReadAheadEnable()) {
+                scanFileAndSetReadMode(LibC.MADV_RANDOM);
+            }
+            if (defaultMessageStore.getMessageStoreConfig().isTransientStorePoolEnable()) {
+                MappedFile lastMappedFile = this.mappedFileQueue.getLastMappedFile();
+                if (lastMappedFile != null) {
+                    lastMappedFile.setWriteBuffer4LastCommitLogAfterRestart(defaultMessageStore.getTransientStorePool());
+                }
+            }
         }
         this.mappedFileQueue.checkSelf();
         log.info("load commit log " + (result ? "OK" : "Failed"));
@@ -713,7 +721,7 @@ public class CommitLog implements Swappable {
             long mappedFileOffset = 0;
             long lastValidMsgPhyOffset = processOffset;
             long lastConfirmValidMsgPhyOffset = processOffset;
-            // abnormal recover require dispatching
+            // abnormal recovery requires dispatching
             boolean doDispatch = true;
             while (true) {
                 DispatchRequest dispatchRequest = this.checkMessageAndReturnSize(byteBuffer, checkCRCOnRecover, checkDupInfo);

@@ -926,4 +926,10 @@ public class DefaultMappedFile extends AbstractMappedFile {
         }
     }
 
+    @Override
+    public void setWriteBuffer4LastCommitLogAfterRestart(final TransientStorePool transientStorePool) {
+        this.writeBuffer = transientStorePool.borrowBuffer();
+        this.transientStorePool = transientStorePool;
+    }
+
 }
