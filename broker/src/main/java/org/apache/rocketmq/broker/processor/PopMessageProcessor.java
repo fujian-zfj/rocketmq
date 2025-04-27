@@ -16,27 +16,13 @@
  */
 package org.apache.rocketmq.broker.processor;
 
-import com.alibaba.fastjson.JSON;
+import com.alibaba.fastjson2.JSON;
 import com.googlecode.concurrentlinkedhashmap.ConcurrentLinkedHashMap;
 import io.netty.channel.Channel;
 import io.netty.channel.ChannelFutureListener;
 import io.netty.channel.ChannelHandlerContext;
 import io.netty.channel.FileRegion;
 import io.opentelemetry.api.common.Attributes;
-import java.nio.ByteBuffer;
-import java.nio.charset.StandardCharsets;
-import java.util.Iterator;
-import java.util.List;
-import java.util.Map;
-import java.util.Map.Entry;
-import java.util.Objects;
-import java.util.Random;
-import java.util.concurrent.CompletableFuture;
-import java.util.concurrent.ConcurrentHashMap;
-import java.util.concurrent.ConcurrentSkipListSet;
-import java.util.concurrent.TimeUnit;
-import java.util.concurrent.atomic.AtomicBoolean;
-import java.util.concurrent.atomic.AtomicLong;
 import org.apache.rocketmq.broker.BrokerController;
 import org.apache.rocketmq.broker.filter.ConsumerFilterData;
 import org.apache.rocketmq.broker.filter.ConsumerFilterManager;
@@ -64,6 +50,7 @@ import org.apache.rocketmq.common.message.MessageDecoder;
 import org.apache.rocketmq.common.message.MessageExt;
 import org.apache.rocketmq.common.message.MessageExtBrokerInner;
 import org.apache.rocketmq.common.topic.TopicValidator;
+import org.apache.rocketmq.common.utils.ConcurrentHashMapUtils;
 import org.apache.rocketmq.logging.org.slf4j.Logger;
 import org.apache.rocketmq.logging.org.slf4j.LoggerFactory;
 import org.apache.rocketmq.remoting.CommandCallback;
@@ -89,6 +76,21 @@ import org.apache.rocketmq.store.exception.ConsumeQueueException;
 import org.apache.rocketmq.store.pop.AckMsg;
 import org.apache.rocketmq.store.pop.BatchAckMsg;
 import org.apache.rocketmq.store.pop.PopCheckPoint;
+
+import java.nio.ByteBuffer;
+import java.nio.charset.StandardCharsets;
+import java.util.Iterator;
+import java.util.List;
+import java.util.Map;
+import java.util.Map.Entry;
+import java.util.Objects;
+import java.util.Random;
+import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.ConcurrentSkipListSet;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicLong;
 
 import static org.apache.rocketmq.broker.metrics.BrokerMetricsConstant.LABEL_CONSUMER_GROUP;
 import static org.apache.rocketmq.broker.metrics.BrokerMetricsConstant.LABEL_IS_RETRY;
@@ -150,11 +152,11 @@ public class PopMessageProcessor implements NettyRequestProcessor {
 
     public static String genBatchAckUniqueId(BatchAckMsg batchAckMsg) {
         return batchAckMsg.getTopic()
-                + PopAckConstants.SPLIT + batchAckMsg.getQueueId()
-                + PopAckConstants.SPLIT + batchAckMsg.getAckOffsetList().toString()
-                + PopAckConstants.SPLIT + batchAckMsg.getConsumerGroup()
-                + PopAckConstants.SPLIT + batchAckMsg.getPopTime()
-                + PopAckConstants.SPLIT + PopAckConstants.BATCH_ACK_TAG;
+            + PopAckConstants.SPLIT + batchAckMsg.getQueueId()
+            + PopAckConstants.SPLIT + batchAckMsg.getAckOffsetList().toString()
+            + PopAckConstants.SPLIT + batchAckMsg.getConsumerGroup()
+            + PopAckConstants.SPLIT + batchAckMsg.getPopTime()
+            + PopAckConstants.SPLIT + PopAckConstants.BATCH_ACK_TAG;
     }
 
     public static String genCkUniqueId(PopCheckPoint ck) {
@@ -234,7 +236,6 @@ public class PopMessageProcessor implements NettyRequestProcessor {
         final PopMessageRequestHeader requestHeader =
             request.decodeCommandCustomHeader(PopMessageRequestHeader.class, true);
         final PopMessageResponseHeader responseHeader = (PopMessageResponseHeader) response.readCustomHeader();
-        requestHeader.setBornTime(System.currentTimeMillis());
 
         // Pop mode only supports consumption in cluster load balancing mode
         brokerController.getConsumerManager().compensateBasicConsumerInfo(
@@ -383,7 +384,8 @@ public class PopMessageProcessor implements NettyRequestProcessor {
             CompletableFuture<PopConsumerContext> popAsyncFuture = brokerController.getPopConsumerService().popAsync(
                 RemotingHelper.parseChannelRemoteAddr(channel), beginTimeMills, requestHeader.getInvisibleTime(),
                 requestHeader.getConsumerGroup(), requestHeader.getTopic(), requestHeader.getQueueId(),
-                requestHeader.getMaxMsgNums(), requestHeader.isOrder(), requestHeader.getAttemptId(), messageFilter);
+                requestHeader.getMaxMsgNums(), requestHeader.isOrder(),
+                requestHeader.getAttemptId(), requestHeader.getInitMode(), messageFilter);
 
             popAsyncFuture.thenApply(result -> {
                 if (result.isFound()) {
@@ -679,7 +681,9 @@ public class PopMessageProcessor implements NettyRequestProcessor {
         CompletableFuture<Long> future = new CompletableFuture<>();
         if (!queueLockManager.tryLock(lockKey)) {
             try {
-                restNum = this.brokerController.getMessageStore().getMaxOffsetInQueue(topic, queueId) - offset + restNum;
+                if (!requestHeader.isOrder()) {
+                    restNum = this.brokerController.getMessageStore().getMaxOffsetInQueue(topic, queueId) - offset + restNum;
+                }
                 future.complete(restNum);
             } catch (ConsumeQueueException e) {
                 future.completeExceptionally(e);
@@ -862,7 +866,7 @@ public class PopMessageProcessor implements NettyRequestProcessor {
 
     private boolean isPopShouldStop(String topic, String group, int queueId) {
         return brokerController.getBrokerConfig().isEnablePopMessageThreshold() &&
-                brokerController.getPopInflightMessageCounter().getGroupPopInFlightMessageNum(topic, group, queueId) > brokerController.getBrokerConfig().getPopInflightMessageThreshold();
+            brokerController.getPopInflightMessageCounter().getGroupPopInFlightMessageNum(topic, group, queueId) > brokerController.getBrokerConfig().getPopInflightMessageThreshold();
     }
 
     private long getPopOffset(String topic, String group, int queueId, int initMode, boolean init, String lockKey,
@@ -888,7 +892,7 @@ public class PopMessageProcessor implements NettyRequestProcessor {
         }
     }
 
-    private long getInitOffset(String topic, String group, int queueId, int initMode, boolean init)
+    public long getInitOffset(String topic, String group, int queueId, int initMode, boolean init)
         throws ConsumeQueueException {
         long offset;
         if (ConsumeInitMode.MIN == initMode || topic.startsWith(MixAll.RETRY_GROUP_TOPIC_PREFIX)) {
@@ -909,7 +913,7 @@ public class PopMessageProcessor implements NettyRequestProcessor {
         }
         if (init) { // whichever initMode
             this.brokerController.getConsumerOffsetManager().commitOffset(
-                    "getPopOffset", group, topic, queueId, offset);
+                "getPopOffset", group, topic, queueId, offset);
         }
         return offset;
     }
@@ -1003,12 +1007,13 @@ public class PopMessageProcessor implements NettyRequestProcessor {
         private volatile long lockTime;
 
         public TimedLock() {
-            this.lock = new AtomicBoolean(true);
+            // init lock status, false means not locked
+            this.lock = new AtomicBoolean(false);
             this.lockTime = System.currentTimeMillis();
         }
 
         public boolean tryLock() {
-            boolean ret = lock.compareAndSet(true, false);
+            boolean ret = lock.compareAndSet(false, true);
             if (ret) {
                 this.lockTime = System.currentTimeMillis();
                 return true;
@@ -1018,11 +1023,11 @@ public class PopMessageProcessor implements NettyRequestProcessor {
         }
 
         public void unLock() {
-            lock.set(true);
+            lock.set(false);
         }
 
         public boolean isLock() {
-            return !lock.get();
+            return lock.get();
         }
 
         public long getLockTime() {
@@ -1042,21 +1047,7 @@ public class PopMessageProcessor implements NettyRequestProcessor {
         }
 
         public boolean tryLock(String key) {
-            TimedLock timedLock = expiredLocalCache.get(key);
-
-            if (timedLock == null) {
-                TimedLock old = expiredLocalCache.putIfAbsent(key, new TimedLock());
-                if (old != null) {
-                    return false;
-                } else {
-                    timedLock = expiredLocalCache.get(key);
-                }
-            }
-
-            if (timedLock == null) {
-                return false;
-            }
-
+            TimedLock timedLock = ConcurrentHashMapUtils.computeIfAbsent(expiredLocalCache, key, k -> new TimedLock());
             return timedLock.tryLock();
         }
 

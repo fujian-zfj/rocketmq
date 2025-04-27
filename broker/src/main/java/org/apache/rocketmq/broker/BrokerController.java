@@ -40,6 +40,7 @@ import java.util.concurrent.TimeUnit;
 import java.util.concurrent.locks.Lock;
 import java.util.concurrent.locks.ReentrantLock;
 import java.util.function.Function;
+import java.util.function.Supplier;
 import java.util.stream.Collectors;
 import org.apache.rocketmq.acl.AccessValidator;
 import org.apache.rocketmq.acl.plain.PlainAccessValidator;
@@ -691,6 +692,18 @@ public class BrokerController {
         }, 10, 1, TimeUnit.SECONDS);
 
         this.scheduledExecutorService.scheduleAtFixedRate(new Runnable() {
+            @Override
+            public void run() {
+                try {
+                    BrokerController.this.messageStore.getTimerMessageStore().getTimerMetrics()
+                            .cleanMetrics(BrokerController.this.topicConfigManager.getTopicConfigTable().keySet());
+                } catch (Throwable e) {
+                    LOG.error("BrokerController: failed to clean unused timer metrics.", e);
+                }
+            }
+        }, 3, 3, TimeUnit.MINUTES);
+
+        this.scheduledExecutorService.scheduleAtFixedRate(new Runnable() {
 
             @Override
             public void run() {
@@ -1280,16 +1293,40 @@ public class BrokerController {
         return this.headSlowTimeMills(this.queryThreadPoolQueue);
     }
 
+    public long headSlowTimeMills4AckThreadPoolQueue() {
+        return this.headSlowTimeMills(this.ackThreadPoolQueue);
+    }
+
+    public long headSlowTimeMills4EndTransactionThreadPoolQueue() {
+        return this.headSlowTimeMills(this.endTransactionThreadPoolQueue);
+    }
+
+    public long headSlowTimeMills4ClientManagerThreadPoolQueue() {
+        return this.headSlowTimeMills(this.clientManagerThreadPoolQueue);
+    }
+
+    public long headSlowTimeMills4HeartbeatThreadPoolQueue() {
+        return this.headSlowTimeMills(this.heartbeatThreadPoolQueue);
+    }
+
+    public long headSlowTimeMills4AdminBrokerThreadPoolQueue() {
+        return this.headSlowTimeMills(this.adminBrokerThreadPoolQueue);
+    }
+
     public void printWaterMark() {
-        LOG_WATER_MARK.info("[WATERMARK] Send Queue Size: {} SlowTimeMills: {}", this.sendThreadPoolQueue.size(), headSlowTimeMills4SendThreadPoolQueue());
-        LOG_WATER_MARK.info("[WATERMARK] Pull Queue Size: {} SlowTimeMills: {}", this.pullThreadPoolQueue.size(), headSlowTimeMills4PullThreadPoolQueue());
-        LOG_WATER_MARK.info("[WATERMARK] Query Queue Size: {} SlowTimeMills: {}", this.queryThreadPoolQueue.size(), headSlowTimeMills4QueryThreadPoolQueue());
-        LOG_WATER_MARK.info("[WATERMARK] Lite Pull Queue Size: {} SlowTimeMills: {}", this.litePullThreadPoolQueue.size(), headSlowTimeMills4LitePullThreadPoolQueue());
-        LOG_WATER_MARK.info("[WATERMARK] Transaction Queue Size: {} SlowTimeMills: {}", this.endTransactionThreadPoolQueue.size(), headSlowTimeMills(this.endTransactionThreadPoolQueue));
-        LOG_WATER_MARK.info("[WATERMARK] ClientManager Queue Size: {} SlowTimeMills: {}", this.clientManagerThreadPoolQueue.size(), this.headSlowTimeMills(this.clientManagerThreadPoolQueue));
-        LOG_WATER_MARK.info("[WATERMARK] Heartbeat Queue Size: {} SlowTimeMills: {}", this.heartbeatThreadPoolQueue.size(), this.headSlowTimeMills(this.heartbeatThreadPoolQueue));
-        LOG_WATER_MARK.info("[WATERMARK] Ack Queue Size: {} SlowTimeMills: {}", this.ackThreadPoolQueue.size(), headSlowTimeMills(this.ackThreadPoolQueue));
-        LOG_WATER_MARK.info("[WATERMARK] Admin Queue Size: {} SlowTimeMills: {}", this.adminBrokerThreadPoolQueue.size(), headSlowTimeMills(this.adminBrokerThreadPoolQueue));
+        logWaterMarkQueueInfo("Send", this.sendThreadPoolQueue, this::headSlowTimeMills4SendThreadPoolQueue);
+        logWaterMarkQueueInfo("Pull", this.pullThreadPoolQueue, this::headSlowTimeMills4PullThreadPoolQueue);
+        logWaterMarkQueueInfo("Query", this.queryThreadPoolQueue, this::headSlowTimeMills4QueryThreadPoolQueue);
+        logWaterMarkQueueInfo("Lite Pull", this.litePullThreadPoolQueue, this::headSlowTimeMills4LitePullThreadPoolQueue);
+        logWaterMarkQueueInfo("Transaction", this.endTransactionThreadPoolQueue, this::headSlowTimeMills4EndTransactionThreadPoolQueue);
+        logWaterMarkQueueInfo("ClientManager", this.clientManagerThreadPoolQueue, this::headSlowTimeMills4ClientManagerThreadPoolQueue);
+        logWaterMarkQueueInfo("Heartbeat", this.heartbeatThreadPoolQueue, this::headSlowTimeMills4HeartbeatThreadPoolQueue);
+        logWaterMarkQueueInfo("Ack", this.ackThreadPoolQueue, this::headSlowTimeMills4AckThreadPoolQueue);
+        logWaterMarkQueueInfo("Admin", this.adminBrokerThreadPoolQueue, this::headSlowTimeMills4AdminBrokerThreadPoolQueue);
+    }
+
+    private void logWaterMarkQueueInfo(String queueName, BlockingQueue<?> queue, Supplier<Long> slowTimeSupplier) {
+        LOG_WATER_MARK.info("[WATERMARK] {} Queue Size: {} SlowTimeMills: {}", queueName, queue.size(), slowTimeSupplier.get());
     }
 
     public MessageStore getMessageStore() {
@@ -1429,10 +1466,19 @@ public class BrokerController {
             this.popConsumerService.shutdown();
         }
 
-        {
+        if (this.popMessageProcessor.getPopLongPollingService() != null) {
             this.popMessageProcessor.getPopLongPollingService().shutdown();
+        }
+
+        if (this.popMessageProcessor.getQueueLockManager() != null) {
             this.popMessageProcessor.getQueueLockManager().shutdown();
+        }
+
+        if (this.popMessageProcessor.getPopBufferMergeService() != null) {
             this.popMessageProcessor.getPopBufferMergeService().shutdown();
+        }
+
+        if (this.ackMessageProcessor.getPopReviveServices() != null) {
             this.ackMessageProcessor.shutdownPopReviveService();
         }
 
@@ -1547,7 +1593,7 @@ public class BrokerController {
         }
 
         if (this.escapeBridge != null) {
-            escapeBridge.shutdown();
+            this.escapeBridge.shutdown();
         }
 
         if (this.topicRouteInfoManager != null) {
@@ -1584,8 +1630,13 @@ public class BrokerController {
             this.consumerOffsetManager.stop();
         }
 
-        if (null != configStorage) {
-            configStorage.shutdown();
+        if (this.consumerOrderInfoManager != null) {
+            this.consumerOrderInfoManager.persist();
+            this.consumerOrderInfoManager.shutdown();
+        }
+
+        if (this.configStorage != null) {
+            this.configStorage.shutdown();
         }
 
         if (this.authenticationMetadataManager != null) {
