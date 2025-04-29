@@ -27,6 +27,7 @@ import org.apache.rocketmq.broker.BrokerController;
 import org.apache.rocketmq.broker.loadbalance.MessageRequestModeManager;
 import org.apache.rocketmq.broker.subscription.SubscriptionGroupManager;
 import org.apache.rocketmq.broker.topic.TopicConfigManager;
+import org.apache.rocketmq.broker.topic.TopicQueueMappingManager;
 import org.apache.rocketmq.common.MixAll;
 import org.apache.rocketmq.common.TopicConfig;
 import org.apache.rocketmq.common.constant.LoggerName;
@@ -81,41 +82,40 @@ public class SlaveSynchronize {
                 TopicConfigAndMappingSerializeWrapper topicWrapper =
                         this.brokerController.getBrokerOuterAPI().getAllTopicConfig(masterAddrBak);
                 TopicConfigManager topicConfigManager = this.brokerController.getTopicConfigManager();
+                ConcurrentMap<String, TopicConfig> topicConfigTable = topicConfigManager.getTopicConfigTable();
+
                 if (!topicConfigManager.getDataVersion().equals(topicWrapper.getDataVersion())) {
-
                     topicConfigManager.getDataVersion().assignNewOne(topicWrapper.getDataVersion());
-
                     ConcurrentMap<String, TopicConfig> newTopicConfigTable = topicWrapper.getTopicConfigTable();
-                    ConcurrentMap<String, TopicConfig> topicConfigTable = topicConfigManager.getTopicConfigTable();
 
                     //delete
                     Iterator<Map.Entry<String, TopicConfig>> iterator = topicConfigTable.entrySet().iterator();
                     while (iterator.hasNext()) {
                         Map.Entry<String, TopicConfig> entry = iterator.next();
                         if (!newTopicConfigTable.containsKey(entry.getKey())) {
-                            iterator.remove();
+                            topicConfigManager.deleteTopicConfig(entry.getKey());
                         }
-                        topicConfigManager.deleteTopicConfig(entry.getKey());
                     }
 
                     //update
-                    newTopicConfigTable.values().forEach(topicConfigManager::updateSingleTopicConfigWithoutPersist);
+                    newTopicConfigTable.values().forEach(topicConfigManager::putTopicConfig);
 
                     topicConfigManager.persist();
                 }
+
+                TopicQueueMappingManager topicQueueMappingManager = this.brokerController.getTopicQueueMappingManager();
                 if (topicWrapper.getTopicQueueMappingDetailMap() != null
-                        && !topicWrapper.getMappingDataVersion().equals(this.brokerController.getTopicQueueMappingManager().getDataVersion())) {
+                        && !topicWrapper.getMappingDataVersion().equals(topicQueueMappingManager.getDataVersion())) {
                     this.brokerController.getTopicQueueMappingManager().getDataVersion()
                             .assignNewOne(topicWrapper.getMappingDataVersion());
 
                     ConcurrentMap<String, TopicConfig> newTopicConfigTable = topicWrapper.getTopicConfigTable();
                     //delete
-                    ConcurrentMap<String, TopicConfig> topicConfigTable = this.brokerController.getTopicConfigManager().getTopicConfigTable();
                     topicConfigTable.entrySet().removeIf(item -> !newTopicConfigTable.containsKey(item.getKey()));
                     //update
                     topicConfigTable.putAll(newTopicConfigTable);
 
-                    this.brokerController.getTopicQueueMappingManager().persist();
+                    topicQueueMappingManager.persist();
                 }
                 LOGGER.info("Update slave topic config from master, {}", masterAddrBak);
             } catch (Exception e) {
