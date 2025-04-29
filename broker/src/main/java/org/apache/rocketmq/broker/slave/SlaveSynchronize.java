@@ -187,12 +187,11 @@ public class SlaveSynchronize {
                     while (iterator.hasNext()) {
                         Map.Entry<String, SubscriptionGroupConfig> configEntry = iterator.next();
                         if (!newSubscriptionGroupTable.containsKey(configEntry.getKey())) {
-                            iterator.remove();
+                            subscriptionGroupManager.deleteSubscriptionGroupConfig(configEntry.getKey());
                         }
-                        subscriptionGroupManager.deleteSubscriptionGroupConfig(configEntry.getKey());
                     }
                     // update
-                    newSubscriptionGroupTable.values().forEach(subscriptionGroupManager::updateSubscriptionGroupConfigWithoutPersist);
+                    newSubscriptionGroupTable.values().forEach(subscriptionGroupManager::putSubscriptionGroupConfig);
                     // persist
                     subscriptionGroupManager.persist();
                     LOGGER.info("Update slave Subscription Group from master, {}", masterAddrBak);
