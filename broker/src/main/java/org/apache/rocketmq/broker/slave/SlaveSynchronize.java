@@ -106,8 +106,7 @@ public class SlaveSynchronize {
                 TopicQueueMappingManager topicQueueMappingManager = this.brokerController.getTopicQueueMappingManager();
                 if (topicWrapper.getTopicQueueMappingDetailMap() != null
                         && !topicWrapper.getMappingDataVersion().equals(topicQueueMappingManager.getDataVersion())) {
-                    this.brokerController.getTopicQueueMappingManager().getDataVersion()
-                            .assignNewOne(topicWrapper.getMappingDataVersion());
+                    topicQueueMappingManager.getDataVersion().assignNewOne(topicWrapper.getMappingDataVersion());
 
                     ConcurrentMap<String, TopicConfig> newTopicConfigTable = topicWrapper.getTopicConfigTable();
                     //delete
