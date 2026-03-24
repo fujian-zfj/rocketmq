@@ -21,6 +21,7 @@ import io.netty.channel.ChannelHandlerContext;
 import io.netty.channel.embedded.EmbeddedChannel;
 import org.apache.rocketmq.broker.BrokerController;
 import org.apache.rocketmq.broker.client.ClientChannelInfo;
+import org.apache.rocketmq.broker.metrics.BrokerMetricsManager;
 import org.apache.rocketmq.common.BrokerConfig;
 import org.apache.rocketmq.common.KeyBuilder;
 import org.apache.rocketmq.common.TopicConfig;
@@ -83,6 +84,8 @@ public class PopMessageProcessorTest {
     public void init() {
         brokerController.setMessageStore(messageStore);
         brokerController.getBrokerConfig().setEnablePopBufferMerge(true);
+        // Initialize BrokerMetricsManager to prevent NPE in tests
+        brokerController.setBrokerMetricsManager(new BrokerMetricsManager(brokerController));
         popMessageProcessor = new PopMessageProcessor(brokerController);
         when(handlerContext.channel()).thenReturn(embeddedChannel);
         brokerController.getTopicConfigManager().getTopicConfigTable().put(topic, new TopicConfig(topic));
@@ -212,6 +215,33 @@ public class PopMessageProcessorTest {
         messageStore.getMaxOffsetInQueue(topic, 0); // prevent UnnecessaryStubbingException
     }
 
+    @Test
+    public void testBuildCkMsgJsonParsing() {
+        PopCheckPoint ck = new PopCheckPoint();
+        ck.setTopic("TestTopic");
+        ck.setQueueId(1);
+        ck.setStartOffset(100L);
+        ck.setCId("TestConsumer");
+        ck.setPopTime(System.currentTimeMillis());
+        ck.setBrokerName("TestBroker");
+
+        int reviveQid = 0;
+        PopMessageProcessor processor = new PopMessageProcessor(brokerController);
+
+        MessageExtBrokerInner result = processor.buildCkMsg(ck, reviveQid);
+
+        String jsonBody = new String(result.getBody(), StandardCharsets.UTF_8);
+        PopCheckPoint actual = JSON.parseObject(jsonBody, PopCheckPoint.class);
+
+        assertEquals(ck.getTopic(), actual.getTopic());
+        assertEquals(ck.getQueueId(), actual.getQueueId());
+        assertEquals(ck.getStartOffset(), actual.getStartOffset());
+        assertEquals(ck.getCId(), actual.getCId());
+        assertEquals(ck.getPopTime(), actual.getPopTime());
+        assertEquals(ck.getBrokerName(), actual.getBrokerName());
+        assertEquals(ck.getReviveTime(), actual.getReviveTime());
+    }
+
     private RemotingCommand createPopMsgCommand() {
         return createPopMsgCommand(group, topic, -1, ConsumeInitMode.MAX);
     }
@@ -244,32 +274,5 @@ public class PopMessageProcessorTest {
             getMessageResult.addMessage(new SelectMappedBufferResult(200, bb, 64, new DefaultMappedFile()));
         }
         return getMessageResult;
-    }
-
-    @Test
-    public void testBuildCkMsgJsonParsing() {
-        PopCheckPoint ck = new PopCheckPoint();
-        ck.setTopic("TestTopic");
-        ck.setQueueId(1);
-        ck.setStartOffset(100L);
-        ck.setCId("TestConsumer");
-        ck.setPopTime(System.currentTimeMillis());
-        ck.setBrokerName("TestBroker");
-
-        int reviveQid = 0;
-        PopMessageProcessor processor = new PopMessageProcessor(brokerController);
-
-        MessageExtBrokerInner result = processor.buildCkMsg(ck, reviveQid);
-
-        String jsonBody = new String(result.getBody(), StandardCharsets.UTF_8);
-        PopCheckPoint actual = JSON.parseObject(jsonBody, PopCheckPoint.class);
-
-        assertEquals(ck.getTopic(), actual.getTopic());
-        assertEquals(ck.getQueueId(), actual.getQueueId());
-        assertEquals(ck.getStartOffset(), actual.getStartOffset());
-        assertEquals(ck.getCId(), actual.getCId());
-        assertEquals(ck.getPopTime(), actual.getPopTime());
-        assertEquals(ck.getBrokerName(), actual.getBrokerName());
-        assertEquals(ck.getReviveTime(), actual.getReviveTime());
     }
 }

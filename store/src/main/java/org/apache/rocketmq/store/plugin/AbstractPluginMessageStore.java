@@ -17,6 +17,10 @@
 
 package org.apache.rocketmq.store.plugin;
 
+import io.opentelemetry.api.common.AttributesBuilder;
+import io.opentelemetry.api.metrics.Meter;
+import io.opentelemetry.sdk.metrics.InstrumentSelector;
+import io.opentelemetry.sdk.metrics.ViewBuilder;
 import java.nio.ByteBuffer;
 import java.util.HashMap;
 import java.util.LinkedList;
@@ -24,6 +28,7 @@ import java.util.List;
 import java.util.Set;
 import java.util.concurrent.CompletableFuture;
 import java.util.function.Supplier;
+import org.apache.rocketmq.common.BoundaryType;
 import org.apache.rocketmq.common.Pair;
 import org.apache.rocketmq.common.SystemClock;
 import org.apache.rocketmq.common.message.MessageExt;
@@ -38,6 +43,7 @@ import org.apache.rocketmq.store.DispatchRequest;
 import org.apache.rocketmq.store.GetMessageResult;
 import org.apache.rocketmq.store.MessageFilter;
 import org.apache.rocketmq.store.MessageStore;
+import org.apache.rocketmq.store.MessageStoreStateMachine;
 import org.apache.rocketmq.store.PutMessageResult;
 import org.apache.rocketmq.store.QueryMessageResult;
 import org.apache.rocketmq.store.RunningFlags;
@@ -56,12 +62,8 @@ import org.apache.rocketmq.store.queue.ConsumeQueueStoreInterface;
 import org.apache.rocketmq.store.stats.BrokerStatsManager;
 import org.apache.rocketmq.store.timer.TimerMessageStore;
 import org.apache.rocketmq.store.util.PerfCounter;
+import org.apache.rocketmq.store.metrics.StoreMetricsManager;
 import org.rocksdb.RocksDBException;
-
-import io.opentelemetry.api.common.AttributesBuilder;
-import io.opentelemetry.api.metrics.Meter;
-import io.opentelemetry.sdk.metrics.InstrumentSelector;
-import io.opentelemetry.sdk.metrics.ViewBuilder;
 
 public abstract class AbstractPluginMessageStore implements MessageStore {
     protected MessageStore next;
@@ -162,6 +164,11 @@ public abstract class AbstractPluginMessageStore implements MessageStore {
     @Override
     public long getOffsetInQueueByTime(String topic, int queueId, long timestamp) {
         return next.getOffsetInQueueByTime(topic, queueId, timestamp);
+    }
+
+    @Override
+    public long getOffsetInQueueByTime(String topic, int queueId, long timestamp, BoundaryType boundaryType) {
+        return next.getOffsetInQueueByTime(topic, queueId, timestamp, boundaryType);
     }
 
     @Override
@@ -294,6 +301,11 @@ public abstract class AbstractPluginMessageStore implements MessageStore {
     }
 
     @Override
+    public long flushBehindBytes() {
+        return next.flushBehindBytes();
+    }
+
+    @Override
     public long dispatchBehindMilliseconds() {
         return next.dispatchBehindMilliseconds();
     }
@@ -301,11 +313,6 @@ public abstract class AbstractPluginMessageStore implements MessageStore {
     @Override
     public long flush() {
         return next.flush();
-    }
-
-    @Override
-    public boolean resetWriteOffset(long phyOffset) {
-        return next.resetWriteOffset(phyOffset);
     }
 
     @Override
@@ -665,5 +672,15 @@ public abstract class AbstractPluginMessageStore implements MessageStore {
 
     public MessageStore getNext() {
         return next;
+    }
+
+    @Override
+    public MessageStoreStateMachine getStateMachine() {
+        return next.getStateMachine();
+    }
+
+    @Override
+    public StoreMetricsManager getStoreMetricsManager() {
+        return next.getStoreMetricsManager();
     }
 }

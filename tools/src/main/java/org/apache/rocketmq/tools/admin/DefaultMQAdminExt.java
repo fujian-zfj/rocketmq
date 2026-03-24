@@ -28,7 +28,6 @@ import org.apache.rocketmq.client.exception.MQClientException;
 import org.apache.rocketmq.common.BoundaryType;
 import org.apache.rocketmq.common.CheckRocksdbCqWriteResult;
 import org.apache.rocketmq.common.Pair;
-import org.apache.rocketmq.common.PlainAccessConfig;
 import org.apache.rocketmq.common.TopicConfig;
 import org.apache.rocketmq.common.message.MessageExt;
 import org.apache.rocketmq.common.message.MessageQueue;
@@ -47,13 +46,17 @@ import org.apache.rocketmq.remoting.protocol.body.AclInfo;
 import org.apache.rocketmq.remoting.protocol.body.BrokerMemberGroup;
 import org.apache.rocketmq.remoting.protocol.body.BrokerReplicasInfo;
 import org.apache.rocketmq.remoting.protocol.body.BrokerStatsData;
-import org.apache.rocketmq.remoting.protocol.body.ClusterAclVersionInfo;
 import org.apache.rocketmq.remoting.protocol.body.ClusterInfo;
 import org.apache.rocketmq.remoting.protocol.body.ConsumeMessageDirectlyResult;
 import org.apache.rocketmq.remoting.protocol.body.ConsumeStatsList;
 import org.apache.rocketmq.remoting.protocol.body.ConsumerConnection;
 import org.apache.rocketmq.remoting.protocol.body.ConsumerRunningInfo;
 import org.apache.rocketmq.remoting.protocol.body.EpochEntryCache;
+import org.apache.rocketmq.remoting.protocol.body.GetBrokerLiteInfoResponseBody;
+import org.apache.rocketmq.remoting.protocol.body.GetLiteClientInfoResponseBody;
+import org.apache.rocketmq.remoting.protocol.body.GetLiteGroupInfoResponseBody;
+import org.apache.rocketmq.remoting.protocol.body.GetLiteTopicInfoResponseBody;
+import org.apache.rocketmq.remoting.protocol.body.GetParentTopicInfoResponseBody;
 import org.apache.rocketmq.remoting.protocol.body.GroupList;
 import org.apache.rocketmq.remoting.protocol.body.HARuntimeInfo;
 import org.apache.rocketmq.remoting.protocol.body.KVTable;
@@ -161,6 +164,11 @@ public class DefaultMQAdminExt extends ClientConfig implements MQAdminExt {
         return defaultMQAdminExtImpl.queryMessage(clusterName, topic, key, maxNum, begin, end);
     }
 
+    public QueryResult queryMessage(String clusterName, String topic, String key, int maxNum, long begin, long end, String keyType, String lastKey)
+        throws MQClientException, InterruptedException, RemotingException {
+        return defaultMQAdminExtImpl.queryMessage(clusterName, topic, key, maxNum, begin, end, keyType, lastKey);
+    }
+
     @Override
     public void start() throws MQClientException {
         defaultMQAdminExtImpl.start();
@@ -207,37 +215,6 @@ public class DefaultMQAdminExt extends ClientConfig implements MQAdminExt {
     public void createAndUpdateTopicConfigList(String addr,
         List<TopicConfig> topicConfigList) throws InterruptedException, RemotingException, MQClientException {
         defaultMQAdminExtImpl.createAndUpdateTopicConfigList(addr, topicConfigList);
-    }
-
-    @Override
-    public void createAndUpdatePlainAccessConfig(String addr,
-        PlainAccessConfig config) throws RemotingException, MQBrokerException, InterruptedException, MQClientException {
-        defaultMQAdminExtImpl.createAndUpdatePlainAccessConfig(addr, config);
-    }
-
-    @Override
-    public void deletePlainAccessConfig(String addr,
-        String accessKey) throws RemotingException, MQBrokerException, InterruptedException, MQClientException {
-        defaultMQAdminExtImpl.deletePlainAccessConfig(addr, accessKey);
-    }
-
-    @Override
-    public void updateGlobalWhiteAddrConfig(String addr,
-        String globalWhiteAddrs) throws RemotingException, MQBrokerException, InterruptedException, MQClientException {
-        defaultMQAdminExtImpl.updateGlobalWhiteAddrConfig(addr, globalWhiteAddrs);
-    }
-
-    @Override
-    public void updateGlobalWhiteAddrConfig(String addr,
-        String globalWhiteAddrs,
-        String aclFileFullPath) throws RemotingException, MQBrokerException, InterruptedException, MQClientException {
-        defaultMQAdminExtImpl.updateGlobalWhiteAddrConfig(addr, globalWhiteAddrs, aclFileFullPath);
-    }
-
-    @Override
-    public ClusterAclVersionInfo examineBrokerClusterAclVersionInfo(
-        String addr) throws RemotingException, MQBrokerException, InterruptedException, MQClientException {
-        return defaultMQAdminExtImpl.examineBrokerClusterAclVersionInfo(addr);
     }
 
     @Override
@@ -684,23 +661,23 @@ public class DefaultMQAdminExt extends ClientConfig implements MQAdminExt {
     }
 
     @Override
-    public SubscriptionGroupWrapper getAllSubscriptionGroup(final String brokerAddr,
-        long timeoutMillis) throws InterruptedException, RemotingTimeoutException, RemotingSendRequestException,
-        RemotingConnectException, MQBrokerException {
+    public SubscriptionGroupWrapper getAllSubscriptionGroup(final String brokerAddr, long timeoutMillis)
+        throws InterruptedException, RemotingTimeoutException, RemotingSendRequestException,
+        RemotingConnectException, MQBrokerException, RemotingCommandException {
         return this.defaultMQAdminExtImpl.getAllSubscriptionGroup(brokerAddr, timeoutMillis);
     }
 
     @Override
-    public SubscriptionGroupWrapper getUserSubscriptionGroup(final String brokerAddr,
-        long timeoutMillis) throws InterruptedException, RemotingTimeoutException, RemotingSendRequestException,
-        RemotingConnectException, MQBrokerException {
+    public SubscriptionGroupWrapper getUserSubscriptionGroup(final String brokerAddr, long timeoutMillis)
+        throws InterruptedException, RemotingTimeoutException, RemotingSendRequestException,
+        RemotingConnectException, MQBrokerException, RemotingCommandException {
         return this.defaultMQAdminExtImpl.getUserSubscriptionGroup(brokerAddr, timeoutMillis);
     }
 
     @Override
     public TopicConfigSerializeWrapper getAllTopicConfig(final String brokerAddr,
         long timeoutMillis) throws InterruptedException, RemotingTimeoutException, RemotingSendRequestException,
-        RemotingConnectException, MQBrokerException {
+        RemotingConnectException, MQBrokerException, RemotingCommandException {
         return this.defaultMQAdminExtImpl.getAllTopicConfig(brokerAddr, timeoutMillis);
     }
 
@@ -1018,4 +995,50 @@ public class DefaultMQAdminExt extends ClientConfig implements MQAdminExt {
         RemotingSendRequestException, RemotingTimeoutException, MQBrokerException, InterruptedException {
         defaultMQAdminExtImpl.exportPopRecords(brokerAddr, timeout);
     }
+
+    @Override
+    public void switchTimerEngine(String brokerAddr, String desTimerEngine) throws RemotingConnectException, RemotingSendRequestException, RemotingTimeoutException,
+        UnsupportedEncodingException, InterruptedException, MQBrokerException {
+        defaultMQAdminExtImpl.switchTimerEngine(brokerAddr, desTimerEngine);
+    }
+
+    @Override
+    public GetBrokerLiteInfoResponseBody getBrokerLiteInfo(final String brokerAddr)
+        throws RemotingException, MQBrokerException, InterruptedException {
+        return defaultMQAdminExtImpl.getBrokerLiteInfo(brokerAddr);
+    }
+
+    @Override
+    public GetParentTopicInfoResponseBody getParentTopicInfo(final String brokerAddr, final String topic)
+        throws RemotingException, MQBrokerException, InterruptedException, MQClientException {
+        return defaultMQAdminExtImpl.getParentTopicInfo(brokerAddr, topic);
+    }
+
+    @Override
+    public GetLiteTopicInfoResponseBody getLiteTopicInfo(final String brokerAddr, final String parentTopic,
+        final String liteTopic)
+        throws RemotingException, MQBrokerException, InterruptedException, MQClientException {
+        return defaultMQAdminExtImpl.getLiteTopicInfo(brokerAddr, parentTopic, liteTopic);
+    }
+
+    @Override
+    public GetLiteClientInfoResponseBody getLiteClientInfo(final String brokerAddr, final String parentTopic,
+        final String group, final String clientId)
+        throws RemotingException, MQBrokerException, InterruptedException, MQClientException {
+        return defaultMQAdminExtImpl.getLiteClientInfo(brokerAddr, parentTopic, group, clientId);
+    }
+
+    @Override
+    public GetLiteGroupInfoResponseBody getLiteGroupInfo(final String brokerAddr, final String group,
+        final String liteTopic, final int topK)
+        throws RemotingException, MQBrokerException, InterruptedException, MQClientException {
+        return defaultMQAdminExtImpl.getLiteGroupInfo(brokerAddr, group, liteTopic, topK);
+    }
+
+    @Override
+    public void triggerLiteDispatch(final String brokerAddr, final String group, final String clientId)
+        throws RemotingException, MQBrokerException, InterruptedException, MQClientException {
+        defaultMQAdminExtImpl.triggerLiteDispatch(brokerAddr, group, clientId);
+    }
+
 }

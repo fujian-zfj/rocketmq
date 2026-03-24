@@ -17,6 +17,8 @@
 package org.apache.rocketmq.store;
 
 import com.google.common.base.Strings;
+import com.sun.jna.NativeLong;
+import com.sun.jna.Pointer;
 import java.net.Inet6Address;
 import java.net.InetSocketAddress;
 import java.nio.ByteBuffer;
@@ -34,8 +36,8 @@ import java.util.concurrent.TimeUnit;
 import java.util.concurrent.TimeoutException;
 import java.util.function.Supplier;
 import java.util.stream.Collectors;
-import com.sun.jna.NativeLong;
-import com.sun.jna.Pointer;
+
+import io.netty.util.internal.PlatformDependent;
 import org.apache.rocketmq.common.MixAll;
 import org.apache.rocketmq.common.ServiceThread;
 import org.apache.rocketmq.common.SystemClock;
@@ -66,11 +68,8 @@ import org.apache.rocketmq.store.lock.AdaptiveBackOffSpinLockImpl;
 import org.apache.rocketmq.store.logfile.MappedFile;
 import org.apache.rocketmq.store.queue.ConsumeQueueInterface;
 import org.apache.rocketmq.store.queue.CqUnit;
-import org.apache.rocketmq.store.queue.ReferredIterator;
 import org.apache.rocketmq.store.util.LibC;
 import org.rocksdb.RocksDBException;
-
-import sun.nio.ch.DirectBuffer;
 
 /**
  * Store all metadata downtime for recovery, data protection reliability
@@ -112,14 +111,19 @@ public class CommitLog implements Swappable {
 
     public CommitLog(final DefaultMessageStore messageStore) {
         String storePath = messageStore.getMessageStoreConfig().getStorePathCommitLog();
+        RunningFlags runningFlags = messageStore.getMessageStoreConfig().isEnableRunningFlagsInFlush()
+            ? messageStore.getRunningFlags() : null;
+
         if (storePath.contains(MixAll.MULTI_PATH_SPLITTER)) {
             this.mappedFileQueue = new MultiPathMappedFileQueue(messageStore.getMessageStoreConfig(),
                 messageStore.getMessageStoreConfig().getMappedFileSizeCommitLog(),
-                messageStore.getAllocateMappedFileService(), this::getFullStorePaths);
+                messageStore.getAllocateMappedFileService(), this::getFullStorePaths, runningFlags);
         } else {
             this.mappedFileQueue = new MappedFileQueue(storePath,
                 messageStore.getMessageStoreConfig().getMappedFileSizeCommitLog(),
-                messageStore.getAllocateMappedFileService());
+                messageStore.getAllocateMappedFileService(),
+                runningFlags,
+                messageStore.getMessageStoreConfig().isWriteWithoutMmap());
         }
 
         this.defaultMessageStore = messageStore;
@@ -171,8 +175,12 @@ public class CommitLog implements Swappable {
             scanFileAndSetReadMode(LibC.MADV_RANDOM);
         }
         this.mappedFileQueue.checkSelf();
-        log.info("load commit log " + (result ? "OK" : "Failed"));
+        log.info("load commit log {}", result ? "OK" : "Failed");
         return result;
+    }
+
+    public void cleanResourceAll() {
+        mappedFileQueue.cleanResourcesAll();
     }
 
     public void start() {
@@ -186,12 +194,17 @@ public class CommitLog implements Swappable {
     }
 
     public void shutdown() {
-        this.flushManager.shutdown();
-        log.info("shutdown commitLog successfully. storeRoot: {}", this.defaultMessageStore.getMessageStoreConfig().getStorePathRootDir());
-        flushDiskWatcher.shutdown(true);
+        if (this.flushManager != null) {
+            this.flushManager.shutdown();
+        }
+        if (flushDiskWatcher != null) {
+            flushDiskWatcher.shutdown(true);
+        }
         if (this.coldDataCheckService != null) {
             this.coldDataCheckService.shutdown();
         }
+        putMessageThreadLocal.remove();
+        log.info("shutdown commitLog successfully. storeRoot: {}", this.defaultMessageStore.getMessageStoreConfig().getStorePathRootDir());
     }
 
     public long flush() {
@@ -324,15 +337,21 @@ public class CommitLog implements Swappable {
      *
      * @throws RocksDBException only in rocksdb mode
      */
-    public void recoverNormally(long maxPhyOffsetOfConsumeQueue) throws RocksDBException {
+    public void recoverNormally(long dispatchFromPhyOffset) throws RocksDBException {
         boolean checkCRCOnRecover = this.defaultMessageStore.getMessageStoreConfig().isCheckCRCOnRecover();
         boolean checkDupInfo = this.defaultMessageStore.getMessageStoreConfig().isDuplicationEnable();
+        int maxRecoverNum = this.defaultMessageStore.getMessageStoreConfig().getCommitLogRecoverMaxNum();
+        if (maxRecoverNum <= 0) {
+            maxRecoverNum = 10;
+        }
+        log.info("recoverNormally maxRecoverNum: {}", maxRecoverNum);
         final List<MappedFile> mappedFiles = this.mappedFileQueue.getMappedFiles();
         if (!mappedFiles.isEmpty()) {
             int index = mappedFiles.size() - 1;
             while (index > 0) {
                 MappedFile mappedFile = mappedFiles.get(index);
-                if (mappedFile.getFileFromOffset() <= maxPhyOffsetOfConsumeQueue) {
+                maxRecoverNum--;
+                if (isMappedFileMatchedRecover(mappedFile, true) || maxRecoverNum <= 0) {
                     // It's safe to recover from this mapped file
                     break;
                 }
@@ -345,10 +364,11 @@ public class CommitLog implements Swappable {
             long processOffset = mappedFile.getFileFromOffset();
             long mappedFileOffset = 0;
             long lastValidMsgPhyOffset = this.getConfirmOffset();
+
             while (true) {
                 DispatchRequest dispatchRequest = this.checkMessageAndReturnSize(byteBuffer, checkCRCOnRecover, checkDupInfo);
                 int size = dispatchRequest.getMsgSize();
-                boolean doDispatch = dispatchRequest.getCommitLogOffset() > maxPhyOffsetOfConsumeQueue;
+                boolean doDispatch = dispatchRequest.getCommitLogOffset() > dispatchFromPhyOffset;
                 // Normal data
                 if (dispatchRequest.isSuccess() && size > 0) {
                     lastValidMsgPhyOffset = processOffset + mappedFileOffset;
@@ -363,14 +383,14 @@ public class CommitLog implements Swappable {
                     index++;
                     if (index >= mappedFiles.size()) {
                         // Current branch can not happen
-                        log.info("recover last 3 physics file over, last mapped file " + mappedFile.getFileName());
+                        log.info("recover last 3 physics file over, last mapped file {}", mappedFile.getFileName());
                         break;
                     } else {
                         mappedFile = mappedFiles.get(index);
                         byteBuffer = mappedFile.sliceByteBuffer();
                         processOffset = mappedFile.getFileFromOffset();
                         mappedFileOffset = 0;
-                        log.info("recover next physics file, " + mappedFile.getFileName());
+                        log.info("recover next physics file, {}", mappedFile.getFileName());
                     }
                 }
                 // Intermediate file read error
@@ -378,7 +398,7 @@ public class CommitLog implements Swappable {
                     if (size > 0) {
                         log.warn("found a half message at {}, it will be truncated.", processOffset + mappedFileOffset);
                     }
-                    log.info("recover physics file end, " + mappedFile.getFileName());
+                    log.info("recover physics file end, {}", mappedFile.getFileName());
                     break;
                 }
             }
@@ -398,10 +418,7 @@ public class CommitLog implements Swappable {
             }
 
             // Clear ConsumeQueue redundant data
-            if (maxPhyOffsetOfConsumeQueue >= processOffset) {
-                log.warn("maxPhyOffsetOfConsumeQueue({}) >= processOffset({}), truncate dirty logic files", maxPhyOffsetOfConsumeQueue, processOffset);
-                this.defaultMessageStore.truncateDirtyLogicFiles(processOffset);
-            }
+            this.defaultMessageStore.truncateDirtyLogicFiles(processOffset);
 
             this.mappedFileQueue.setFlushedWhere(processOffset);
             this.mappedFileQueue.setCommittedWhere(processOffset);
@@ -411,8 +428,7 @@ public class CommitLog implements Swappable {
             log.warn("The commitlog files are deleted, and delete the consume queue files");
             this.mappedFileQueue.setFlushedWhere(0);
             this.mappedFileQueue.setCommittedWhere(0);
-            this.defaultMessageStore.getQueueStore().destroy();
-            this.defaultMessageStore.getQueueStore().loadAfterDestroy();
+            this.defaultMessageStore.destroyConsumeQueueStore(true);
         }
     }
 
@@ -453,7 +469,7 @@ public class CommitLog implements Swappable {
                 case BLANK_MAGIC_CODE:
                     return new DispatchRequest(0, true /* success */);
                 default:
-                    log.warn("found a illegal magic code 0x" + Integer.toHexString(magicCode));
+                    log.warn("found a illegal magic code 0x{}", Integer.toHexString(magicCode));
                     return new DispatchRequest(-1, false /* success */);
             }
 
@@ -598,8 +614,18 @@ public class CommitLog implements Swappable {
                             return new DispatchRequest(-1, false/* success */);
                         }
                     } else {
+                        // Read full message for logging when error occurs
+                        ByteBuffer fullMessageBuffer = byteBuffer.duplicate();
+                        int messageStartPos = fullMessageBuffer.position() - totalSize;
+                        fullMessageBuffer.position(messageStartPos);
+                        fullMessageBuffer.limit(messageStartPos + totalSize);
+                        byte[] fullMessageBytes = new byte[totalSize];
+                        fullMessageBuffer.get(fullMessageBytes, 0, totalSize);
+                        
+                        // Print full message and especially properties
                         log.warn(
-                            "CommitLog#checkAndDispatchMessage: failed to check message CRC, not found CRC in properties");
+                            "CommitLog#checkAndDispatchMessage: failed to check message CRC, not found CRC in properties. topic={}, properties={}, propertiesLength={}, fullMessageHex={}",
+                            topic, propertiesMap != null ? propertiesMap.toString() : "null", propertiesLength, UtilAll.bytes2string(fullMessageBytes));
                         return new DispatchRequest(-1, false/* success */);
                     }
                 }
@@ -709,10 +735,16 @@ public class CommitLog implements Swappable {
     /**
      * @throws RocksDBException only in rocksdb mode
      */
-    public void recoverAbnormally(long maxPhyOffsetOfConsumeQueue) throws RocksDBException {
+    public void recoverAbnormally(long dispatchFromPhyOffset) throws RocksDBException {
         // recover by the minimum time stamp
         boolean checkCRCOnRecover = this.defaultMessageStore.getMessageStoreConfig().isCheckCRCOnRecover();
         boolean checkDupInfo = this.defaultMessageStore.getMessageStoreConfig().isDuplicationEnable();
+        boolean checkCommitLogOffsetOnRecover = this.defaultMessageStore.getMessageStoreConfig().isCheckCommitLogOffsetOnRecover();
+        int maxRecoverNum = this.defaultMessageStore.getMessageStoreConfig().getCommitLogRecoverMaxNum();
+        if (maxRecoverNum <= 0) {
+            maxRecoverNum = 10;
+        }
+        log.info("recoverAbnormally maxRecoverNum: {}", maxRecoverNum);
         final List<MappedFile> mappedFiles = this.mappedFileQueue.getMappedFiles();
         if (!mappedFiles.isEmpty()) {
             // Looking beginning to recover from which file
@@ -720,7 +752,8 @@ public class CommitLog implements Swappable {
             MappedFile mappedFile = null;
             for (; index >= 0; index--) {
                 mappedFile = mappedFiles.get(index);
-                if (this.isMappedFileMatchedRecover(mappedFile)) {
+                maxRecoverNum--;
+                if (this.isMappedFileMatchedRecover(mappedFile, false) || maxRecoverNum <= 0) {
                     log.info("recover from this mapped file " + mappedFile.getFileName());
                     break;
                 }
@@ -733,16 +766,45 @@ public class CommitLog implements Swappable {
 
             ByteBuffer byteBuffer = mappedFile.sliceByteBuffer();
             long processOffset = mappedFile.getFileFromOffset();
-            long mappedFileOffset = 0;
-            long lastValidMsgPhyOffset = processOffset;
-            long lastConfirmValidMsgPhyOffset = processOffset;
+            long mappedFileOffset;
+            long lastValidMsgPhyOffset;
+            long lastConfirmValidMsgPhyOffset;
+
+            if (defaultMessageStore.getMessageStoreConfig().isEnableAcceleratedRecovery()) {
+                mappedFileOffset = dispatchFromPhyOffset - mappedFile.getFileFromOffset();
+                // Protective measures, falling back to non-accelerated mode, which is extremely unlikely to occur
+                if (mappedFileOffset < 0) {
+                    mappedFileOffset = 0;
+                    lastValidMsgPhyOffset = processOffset;
+                    lastConfirmValidMsgPhyOffset = processOffset;
+                } else {
+                    log.info("recover using acceleration, recovery offset is {}", dispatchFromPhyOffset);
+                    lastValidMsgPhyOffset = dispatchFromPhyOffset;
+                    lastConfirmValidMsgPhyOffset = dispatchFromPhyOffset;
+                    byteBuffer.position((int) mappedFileOffset);
+                }
+            } else {
+                mappedFileOffset = 0;
+                lastValidMsgPhyOffset = processOffset;
+                lastConfirmValidMsgPhyOffset = processOffset;
+            }
             // abnormal recover require dispatching
             boolean doDispatch = true;
             while (true) {
                 DispatchRequest dispatchRequest = this.checkMessageAndReturnSize(byteBuffer, checkCRCOnRecover, checkDupInfo);
                 int size = dispatchRequest.getMsgSize();
-
                 if (dispatchRequest.isSuccess()) {
+                    // Check commitlog offset validity if enabled
+                    if (size > 0 && checkCommitLogOffsetOnRecover) {
+                        if (dispatchRequest.getCommitLogOffset() < mappedFile.getFileFromOffset()
+                            || dispatchRequest.getCommitLogOffset() > mappedFile.getFileFromOffset() + mappedFile.getFileSize()) {
+                            log.warn("found illegal commitlog offset {} in {}, current pos={}, it will be truncated.",
+                                dispatchRequest.getCommitLogOffset(), mappedFile.getFileName(), processOffset + mappedFileOffset);
+                            log.info("recover physics file end, {} pos={}", mappedFile.getFileName(), byteBuffer.position());
+
+                            break;
+                        }
+                    }
                     // Normal data
                     if (size > 0) {
                         lastValidMsgPhyOffset = processOffset + mappedFileOffset;
@@ -766,14 +828,14 @@ public class CommitLog implements Swappable {
                         if (index >= mappedFiles.size()) {
                             // The current branch under normal circumstances should
                             // not happen
-                            log.info("recover physics file over, last mapped file " + mappedFile.getFileName());
+                            log.info("recover physics file over, last mapped file {}", mappedFile.getFileName());
                             break;
                         } else {
                             mappedFile = mappedFiles.get(index);
                             byteBuffer = mappedFile.sliceByteBuffer();
                             processOffset = mappedFile.getFileFromOffset();
                             mappedFileOffset = 0;
-                            log.info("recover next physics file, " + mappedFile.getFileName());
+                            log.info("recover next physics file, {}", mappedFile.getFileName());
                         }
                     }
                 } else {
@@ -782,7 +844,7 @@ public class CommitLog implements Swappable {
                         log.warn("found a half message at {}, it will be truncated.", processOffset + mappedFileOffset);
                     }
 
-                    log.info("recover physics file end, " + mappedFile.getFileName() + " pos=" + byteBuffer.position());
+                    log.info("recover physics file end, {} pos={}", mappedFile.getFileName(), byteBuffer.position());
                     break;
                 }
             }
@@ -807,10 +869,7 @@ public class CommitLog implements Swappable {
             }
 
             // Clear ConsumeQueue redundant data
-            if (maxPhyOffsetOfConsumeQueue >= processOffset) {
-                log.warn("maxPhyOffsetOfConsumeQueue({}) >= processOffset({}), truncate dirty logic files", maxPhyOffsetOfConsumeQueue, processOffset);
-                this.defaultMessageStore.truncateDirtyLogicFiles(processOffset);
-            }
+            this.defaultMessageStore.truncateDirtyLogicFiles(processOffset);
 
             this.mappedFileQueue.setFlushedWhere(processOffset);
             this.mappedFileQueue.setCommittedWhere(processOffset);
@@ -821,8 +880,7 @@ public class CommitLog implements Swappable {
             log.warn("The commitlog files are deleted, and delete the consume queue files");
             this.mappedFileQueue.setFlushedWhere(0);
             this.mappedFileQueue.setCommittedWhere(0);
-            this.defaultMessageStore.getQueueStore().destroy();
-            this.defaultMessageStore.getQueueStore().loadAfterDestroy();
+            this.defaultMessageStore.destroyConsumeQueueStore(true);
         }
     }
 
@@ -845,49 +903,37 @@ public class CommitLog implements Swappable {
         this.getMessageStore().onCommitLogAppend(msg, result, commitLogFile);
     }
 
-    private boolean isMappedFileMatchedRecover(final MappedFile mappedFile) throws RocksDBException {
+    private boolean isMappedFileMatchedRecover(final MappedFile mappedFile,
+        boolean recoverNormally) throws RocksDBException {
         ByteBuffer byteBuffer = mappedFile.sliceByteBuffer();
 
-        int magicCode = byteBuffer.getInt(MessageDecoder.MESSAGE_MAGIC_CODE_POSITION);
-        if (magicCode != MessageDecoder.MESSAGE_MAGIC_CODE && magicCode != MessageDecoder.MESSAGE_MAGIC_CODE_V2) {
+        boolean checkCRCOnRecover = this.defaultMessageStore.getMessageStoreConfig().isCheckCRCOnRecover();
+        boolean checkDupInfo = this.defaultMessageStore.getMessageStoreConfig().isDuplicationEnable();
+
+        DispatchRequest dispatchRequest = this.checkMessageAndReturnSize(byteBuffer, checkCRCOnRecover, checkDupInfo);
+
+        if (!dispatchRequest.isSuccess()) {
             return false;
         }
 
-        if (this.defaultMessageStore.getMessageStoreConfig().isEnableRocksDBStore()) {
-            final long maxPhyOffsetInConsumeQueue = this.defaultMessageStore.getQueueStore().getMaxPhyOffsetInConsumeQueue();
-            long phyOffset = byteBuffer.getLong(MessageDecoder.MESSAGE_PHYSIC_OFFSET_POSITION);
-            if (phyOffset <= maxPhyOffsetInConsumeQueue) {
-                log.info("find check. beginPhyOffset: {}, maxPhyOffsetInConsumeQueue: {}", phyOffset, maxPhyOffsetInConsumeQueue);
-                return true;
-            }
-        } else {
-            int sysFlag = byteBuffer.getInt(MessageDecoder.SYSFLAG_POSITION);
-            int bornHostLength = (sysFlag & MessageSysFlag.BORNHOST_V6_FLAG) == 0 ? 8 : 20;
-            int msgStoreTimePos = 4 + 4 + 4 + 4 + 4 + 8 + 8 + 4 + 8 + bornHostLength;
-            long storeTimestamp = byteBuffer.getLong(msgStoreTimePos);
-            if (0 == storeTimestamp) {
-                return false;
-            }
+        long storeTimestamp = dispatchRequest.getStoreTimestamp();
+        long phyOffset = dispatchRequest.getCommitLogOffset();
 
-            if (this.defaultMessageStore.getMessageStoreConfig().isMessageIndexEnable()
-                && this.defaultMessageStore.getMessageStoreConfig().isMessageIndexSafe()) {
-                if (storeTimestamp <= this.defaultMessageStore.getStoreCheckpoint().getMinTimestampIndex()) {
-                    log.info("find check timestamp, {} {}",
-                        storeTimestamp,
-                        UtilAll.timeMillisToHumanString(storeTimestamp));
-                    return true;
-                }
-            } else {
-                if (storeTimestamp <= this.defaultMessageStore.getStoreCheckpoint().getMinTimestamp()) {
-                    log.info("find check timestamp, {} {}",
-                        storeTimestamp,
-                        UtilAll.timeMillisToHumanString(storeTimestamp));
-                    return true;
-                }
-            }
+        if (0 == dispatchRequest.getStoreTimestamp()) {
+            return false;
         }
 
-        return false;
+        return isMappedFileMatchedRecover(phyOffset, storeTimestamp, recoverNormally);
+    }
+
+    private boolean isMappedFileMatchedRecover(long phyOffset, long storeTimestamp,
+        boolean recoverNormally) throws RocksDBException {
+        boolean result = this.defaultMessageStore.getQueueStore().isMappedFileMatchedRecover(phyOffset, storeTimestamp, recoverNormally);
+        // Check all registered CommitLogDispatchStore instances
+        for (CommitLogDispatchStore store : defaultMessageStore.getCommitLogDispatchStores()) {
+            result = result && store.isMappedFileMatchedRecover(phyOffset, storeTimestamp, recoverNormally);
+        }
+        return result;
     }
 
     public boolean resetOffset(long offset) {
@@ -1026,8 +1072,7 @@ public class CommitLog implements Swappable {
                     }
                 }
                 if (null == mappedFile) {
-                    log.error("create mapped file1 error, topic: " + msg.getTopic() + " clientAddr: " + msg.getBornHostString());
-                    beginTimeInLock = 0;
+                    log.error("create mapped file1 error, topic: {} clientAddr: {}", msg.getTopic(), msg.getBornHostString());
                     return CompletableFuture.completedFuture(new PutMessageResult(PutMessageStatus.CREATE_MAPPED_FILE_FAILED, null));
                 }
 
@@ -1043,8 +1088,7 @@ public class CommitLog implements Swappable {
                         mappedFile = this.mappedFileQueue.getLastMappedFile(0);
                         if (null == mappedFile) {
                             // XXX: warn and notify me
-                            log.error("create mapped file2 error, topic: " + msg.getTopic() + " clientAddr: " + msg.getBornHostString());
-                            beginTimeInLock = 0;
+                            log.error("create mapped file2 error, topic: {} clientAddr: {}", msg.getTopic(), msg.getBornHostString());
                             return CompletableFuture.completedFuture(new PutMessageResult(PutMessageStatus.CREATE_MAPPED_FILE_FAILED, result));
                         }
                         if (isCloseReadAhead()) {
@@ -1057,17 +1101,15 @@ public class CommitLog implements Swappable {
                         break;
                     case MESSAGE_SIZE_EXCEEDED:
                     case PROPERTIES_SIZE_EXCEEDED:
-                        beginTimeInLock = 0;
                         return CompletableFuture.completedFuture(new PutMessageResult(PutMessageStatus.MESSAGE_ILLEGAL, result));
                     case UNKNOWN_ERROR:
                     default:
-                        beginTimeInLock = 0;
                         return CompletableFuture.completedFuture(new PutMessageResult(PutMessageStatus.UNKNOWN_ERROR, result));
                 }
 
                 elapsedTimeInLock = this.defaultMessageStore.getSystemClock().now() - beginLockTimestamp;
-                beginTimeInLock = 0;
             } finally {
+                beginTimeInLock = 0;
                 putMessageLock.unlock();
             }
             // Increase queue offset when messages are successfully written
@@ -1192,7 +1234,6 @@ public class CommitLog implements Swappable {
                 }
                 if (null == mappedFile) {
                     log.error("Create mapped file1 error, topic: {} clientAddr: {}", messageExtBatch.getTopic(), messageExtBatch.getBornHostString());
-                    beginTimeInLock = 0;
                     return CompletableFuture.completedFuture(new PutMessageResult(PutMessageStatus.CREATE_MAPPED_FILE_FAILED, null));
                 }
 
@@ -1207,7 +1248,6 @@ public class CommitLog implements Swappable {
                         if (null == mappedFile) {
                             // XXX: warn and notify me
                             log.error("Create mapped file2 error, topic: {} clientAddr: {}", messageExtBatch.getTopic(), messageExtBatch.getBornHostString());
-                            beginTimeInLock = 0;
                             return CompletableFuture.completedFuture(new PutMessageResult(PutMessageStatus.CREATE_MAPPED_FILE_FAILED, result));
                         }
                         if (isCloseReadAhead()) {
@@ -1217,17 +1257,15 @@ public class CommitLog implements Swappable {
                         break;
                     case MESSAGE_SIZE_EXCEEDED:
                     case PROPERTIES_SIZE_EXCEEDED:
-                        beginTimeInLock = 0;
                         return CompletableFuture.completedFuture(new PutMessageResult(PutMessageStatus.MESSAGE_ILLEGAL, result));
                     case UNKNOWN_ERROR:
                     default:
-                        beginTimeInLock = 0;
                         return CompletableFuture.completedFuture(new PutMessageResult(PutMessageStatus.UNKNOWN_ERROR, result));
                 }
 
                 elapsedTimeInLock = this.defaultMessageStore.getSystemClock().now() - beginLockTimestamp;
-                beginTimeInLock = 0;
             } finally {
+                beginTimeInLock = 0;
                 putMessageLock.unlock();
             }
 
@@ -1335,6 +1373,9 @@ public class CommitLog implements Swappable {
      * According to receive certain message or offset storage time if an error occurs, it returns -1
      */
     public long pickupStoreTimestamp(final long offset, final int size) {
+        if (defaultMessageStore.isShutdown()) {
+            throw new RuntimeException("message store has shutdown");
+        }
         if (offset >= this.getMinOffset() && offset + size <= this.getMaxOffset()) {
             SelectMappedBufferResult result = this.getMessage(offset, size);
             if (null != result) {
@@ -1393,7 +1434,7 @@ public class CommitLog implements Swappable {
         try {
             MappedFile mappedFile = this.mappedFileQueue.getLastMappedFile(startOffset);
             if (null == mappedFile) {
-                log.error("appendData getLastMappedFile error  " + startOffset);
+                log.error("appendData getLastMappedFile error {}", startOffset);
                 return false;
             }
 
@@ -1463,7 +1504,7 @@ public class CommitLog implements Swappable {
 
         @Override
         public void run() {
-            CommitLog.log.info(this.getServiceName() + " service started");
+            CommitLog.log.info("{} service started", this.getServiceName());
             while (!this.isStopped()) {
                 int interval = CommitLog.this.defaultMessageStore.getMessageStoreConfig().getCommitIntervalCommitLog();
 
@@ -1491,16 +1532,16 @@ public class CommitLog implements Swappable {
                     }
                     this.waitForRunning(interval);
                 } catch (Throwable e) {
-                    CommitLog.log.error(this.getServiceName() + " service has exception. ", e);
+                    CommitLog.log.error("{} service has exception. ", this.getServiceName(), e);
                 }
             }
 
             boolean result = false;
             for (int i = 0; i < RETRY_TIMES_OVER && !result; i++) {
                 result = CommitLog.this.mappedFileQueue.commit(0);
-                CommitLog.log.info(this.getServiceName() + " service shutdown, retry " + (i + 1) + " times " + (result ? "OK" : "Not OK"));
+                CommitLog.log.info("{} service shutdown, retry {} times {}", this.getServiceName(), i + 1, result ? "OK" : "Not OK");
             }
-            CommitLog.log.info(this.getServiceName() + " service end");
+            CommitLog.log.info("{} service end", this.getServiceName());
         }
     }
 
@@ -1510,7 +1551,7 @@ public class CommitLog implements Swappable {
 
         @Override
         public void run() {
-            CommitLog.log.info(this.getServiceName() + " service started");
+            CommitLog.log.info("{} service started", this.getServiceName());
 
             while (!this.isStopped()) {
                 boolean flushCommitLogTimed = CommitLog.this.defaultMessageStore.getMessageStoreConfig().isFlushCommitLogTimed();
@@ -1554,7 +1595,7 @@ public class CommitLog implements Swappable {
                         log.info("Flush data to disk costs {} ms", past);
                     }
                 } catch (Throwable e) {
-                    CommitLog.log.warn(this.getServiceName() + " service has exception. ", e);
+                    CommitLog.log.warn("{} service has exception. ", this.getServiceName(), e);
                     this.printFlushProgress();
                 }
             }
@@ -1563,12 +1604,12 @@ public class CommitLog implements Swappable {
             boolean result = false;
             for (int i = 0; i < RETRY_TIMES_OVER && !result; i++) {
                 result = CommitLog.this.mappedFileQueue.flush(0);
-                CommitLog.log.info(this.getServiceName() + " service shutdown, retry " + (i + 1) + " times " + (result ? "OK" : "Not OK"));
+                CommitLog.log.info("{} service shutdown, retry {} times {}", this.getServiceName(), i + 1, result ? "OK" : "Not OK");
             }
 
             this.printFlushProgress();
 
-            CommitLog.log.info(this.getServiceName() + " service end");
+            CommitLog.log.info("{} service end", this.getServiceName());
         }
 
         @Override
@@ -1632,8 +1673,8 @@ public class CommitLog implements Swappable {
      * GroupCommit Service
      */
     class GroupCommitService extends FlushCommitLogService {
-        private volatile LinkedList<GroupCommitRequest> requestsWrite = new LinkedList<>();
-        private volatile LinkedList<GroupCommitRequest> requestsRead = new LinkedList<>();
+        private LinkedList<GroupCommitRequest> requestsWrite = new LinkedList<>();
+        private LinkedList<GroupCommitRequest> requestsRead = new LinkedList<>();
         private final PutMessageSpinLock lock = new PutMessageSpinLock();
 
         public void putRequest(final GroupCommitRequest request) {
@@ -1695,14 +1736,14 @@ public class CommitLog implements Swappable {
 
         @Override
         public void run() {
-            CommitLog.log.info(this.getServiceName() + " service started");
+            CommitLog.log.info("{} service started", this.getServiceName());
 
             while (!this.isStopped()) {
                 try {
                     this.waitForRunning(10);
                     this.doCommit();
                 } catch (Exception e) {
-                    CommitLog.log.warn(this.getServiceName() + " service has exception. ", e);
+                    CommitLog.log.warn("{} service has exception. ", this.getServiceName(), e);
                 }
             }
 
@@ -1717,7 +1758,7 @@ public class CommitLog implements Swappable {
             this.swapRequests();
             this.doCommit();
 
-            CommitLog.log.info(this.getServiceName() + " service end");
+            CommitLog.log.info("{} service end", this.getServiceName());
         }
 
         @Override
@@ -1803,14 +1844,14 @@ public class CommitLog implements Swappable {
         }
 
         public void run() {
-            CommitLog.log.info(this.getServiceName() + " service started");
+            CommitLog.log.info("{} service started", this.getServiceName());
 
             while (!this.isStopped()) {
                 try {
                     this.waitForRunning(1);
                     this.doCommit();
                 } catch (Exception e) {
-                    CommitLog.log.warn(this.getServiceName() + " service has exception. ", e);
+                    CommitLog.log.warn("{} service has exception. ", this.getServiceName(), e);
                 }
             }
 
@@ -1828,7 +1869,7 @@ public class CommitLog implements Swappable {
 
             this.doCommit();
 
-            CommitLog.log.info(this.getServiceName() + " service end");
+            CommitLog.log.info("{} service end", this.getServiceName());
         }
 
         @Override
@@ -1902,7 +1943,7 @@ public class CommitLog implements Swappable {
 
             // Exceeds the maximum message
             if (msgLen > this.messageStoreConfig.getMaxMessageSize()) {
-                log.warn("message size exceeded, msg total size: " + msgLen + ", maxMessageSize: " + this.messageStoreConfig.getMaxMessageSize());
+                log.warn("message size exceeded, msg total size: {}, maxMessageSize: {}", msgLen, this.messageStoreConfig.getMaxMessageSize());
                 return new AppendMessageResult(AppendMessageStatus.MESSAGE_SIZE_EXCEEDED);
             }
 
@@ -2183,7 +2224,7 @@ public class CommitLog implements Swappable {
                         //flushOK=false;
                     }
                     if (flushStatus != PutMessageStatus.PUT_OK) {
-                        log.error("do groupcommit, wait for flush failed, topic: " + messageExt.getTopic() + " tags: " + messageExt.getTags() + " client address: " + messageExt.getBornHostString());
+                        log.error("do groupcommit, wait for flush failed, topic: {} tags: {} client address: {}", messageExt.getTopic(), messageExt.getTags(), messageExt.getBornHostString());
                         putMessageResult.setPutMessageStatus(PutMessageStatus.FLUSH_DISK_TIMEOUT);
                     }
                 } else {
@@ -2269,6 +2310,10 @@ public class CommitLog implements Swappable {
         return defaultMessageStore;
     }
 
+    public MappedFile getEarliestMappedFile() {
+        return mappedFileQueue.getEarliestMappedFile();
+    }
+
     @Override
     public void swapMap(int reserveNum, long forceSwapIntervalMs, long normalSwapIntervalMs) {
         this.getMappedFileQueue().swapMap(reserveNum, forceSwapIntervalMs, normalSwapIntervalMs);
@@ -2333,7 +2378,7 @@ public class CommitLog implements Swappable {
                     long costTime = this.systemClock.now() - beginClockTimestamp;
                     log.info("[{}] scanFilesInPageCache-cost {} ms.", costTime > 30 * 1000 ? "NOTIFYME" : "OK", costTime);
                 } catch (Throwable e) {
-                    log.warn(this.getServiceName() + " service has e: {}", e);
+                    log.warn("{} service has e: ", this.getServiceName(), e);
                 }
             }
             log.info("{} service end", this.getServiceName());
@@ -2406,7 +2451,7 @@ public class CommitLog implements Swappable {
 
         private byte[] checkFileInPageCache(MappedFile mappedFile) {
             long fileSize = mappedFile.getFileSize();
-            final long address = ((DirectBuffer) mappedFile.getMappedByteBuffer()).address();
+            final long address = PlatformDependent.directBufferAddress(mappedFile.getMappedByteBuffer());
             int pageNums = (int) (fileSize + this.pageSize - 1) / this.pageSize;
             byte[] pageCacheRst = new byte[pageNums];
             int mincore = LibC.INSTANCE.mincore(new Pointer(address), new NativeLong(fileSize), pageCacheRst);
@@ -2449,14 +2494,17 @@ public class CommitLog implements Swappable {
                 if (null == consumeQueue) {
                     return false;
                 }
-                ReferredIterator<CqUnit> bufferConsumeQueue = consumeQueue.iterateFrom(offset, 1);
-                if (null == bufferConsumeQueue || !bufferConsumeQueue.hasNext()) {
+                CqUnit cqUnit = consumeQueue.get(offset);
+                if (null == cqUnit) {
                     return false;
                 }
-                return defaultMessageStore.checkInColdAreaByCommitOffset(bufferConsumeQueue.next().getPos(), getMaxOffset());
+                long offsetPy = cqUnit.getPos();
+                if (offsetPy < 0L) {
+                    return false;
+                }
+                return defaultMessageStore.checkInColdAreaByCommitOffset(offsetPy, getMaxOffset());
             } catch (Exception e) {
-                log.error("isMsgInColdArea group: {}, topic: {}, queueId: {}, offset: {}",
-                    group, topic, queueId, offset, e);
+                log.error("isMsgInColdArea group: {}, topic: {}, queueId: {}, offset: {}", group, topic, queueId, offset, e);
             }
             return false;
         }
@@ -2482,7 +2530,7 @@ public class CommitLog implements Swappable {
             log.error("setFileReadMode mappedFile is null");
             return -1;
         }
-        final long address = ((DirectBuffer) mappedFile.getMappedByteBuffer()).address();
+        final long address = PlatformDependent.directBufferAddress(mappedFile.getMappedByteBuffer());
         int madvise = LibC.INSTANCE.madvise(new Pointer(address), new NativeLong(mappedFile.getFileSize()), mode);
         if (madvise != 0) {
             log.error("setFileReadMode error fileName: {}, madvise: {}, mode:{}", mappedFile.getFileName(), madvise, mode);

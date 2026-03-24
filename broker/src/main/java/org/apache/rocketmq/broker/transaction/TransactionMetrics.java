@@ -18,8 +18,8 @@ package org.apache.rocketmq.broker.transaction;
 
 import com.alibaba.fastjson2.JSON;
 import com.alibaba.fastjson2.JSONWriter;
-import com.google.common.io.Files;
 import org.apache.rocketmq.common.ConfigManager;
+import org.apache.rocketmq.common.MixAll;
 import org.apache.rocketmq.common.constant.LoggerName;
 import org.apache.rocketmq.common.topic.TopicValidator;
 import org.apache.rocketmq.logging.org.slf4j.Logger;
@@ -28,15 +28,21 @@ import org.apache.rocketmq.remoting.protocol.DataVersion;
 import org.apache.rocketmq.remoting.protocol.RemotingSerializable;
 
 import java.io.File;
-import java.io.FileOutputStream;
 import java.io.IOException;
-import java.io.OutputStream;
+import java.io.RandomAccessFile;
+import java.io.StringWriter;
+import java.io.Writer;
+import java.nio.charset.StandardCharsets;
+import java.nio.file.Files;
+import java.nio.file.Paths;
+import java.nio.file.StandardCopyOption;
 import java.util.Iterator;
 import java.util.Map;
 import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ConcurrentMap;
 import java.util.concurrent.atomic.AtomicLong;
+
 
 public class TransactionMetrics extends ConfigManager {
     private static final Logger log = LoggerFactory.getLogger(LoggerName.BROKER_LOGGER_NAME);
@@ -87,11 +93,11 @@ public class TransactionMetrics extends ConfigManager {
         this.transactionCounts = transactionCounts;
     }
 
-    protected void write0(OutputStream out) {
+    protected void write0(Writer writer) throws IOException {
         TransactionMetricsSerializeWrapper wrapper = new TransactionMetricsSerializeWrapper();
         wrapper.setTransactionCount(transactionCounts);
         wrapper.setDataVersion(dataVersion);
-        JSON.writeTo(out, wrapper, JSONWriter.Feature.BrowserCompatible);
+        writer.write(JSON.toJSONString(wrapper, JSONWriter.Feature.BrowserCompatible));
     }
 
     @Override
@@ -176,48 +182,37 @@ public class TransactionMetrics extends ConfigManager {
 
     @Override
     public synchronized void persist() {
-        String config = configFilePath();
-        String temp = config + ".tmp";
-        String backup = config + ".bak";
-        FileOutputStream outputStream = null;
         try {
-            File tmpFile = new File(temp);
-            File parentDirectory = tmpFile.getParentFile();
-            if (!parentDirectory.exists()) {
-                if (!parentDirectory.mkdirs()) {
-                    log.error("Failed to create directory: {}", parentDirectory.getCanonicalPath());
-                    return;
-                }
-            }
-
-            if (!tmpFile.exists()) {
-                if (!tmpFile.createNewFile()) {
-                    log.error("Failed to create file: {}", tmpFile.getCanonicalPath());
-                    return;
-                }
-            }
-            outputStream = new FileOutputStream(tmpFile, false);
-            write0(outputStream);
-            outputStream.flush();
-            outputStream.close();
-            log.debug("Finished writing tmp file: {}", temp);
-
+            // bak metrics file
+            String config = configFilePath();
+            String backup = config + ".bak";
             File configFile = new File(config);
+            File bakFile = new File(backup);
+
             if (configFile.exists()) {
-                Files.copy(configFile, new File(backup));
-                configFile.delete();
+                // atomic move
+                Files.move(configFile.toPath(), bakFile.toPath(), StandardCopyOption.ATOMIC_MOVE);
+
+                // sync the directory, ensure that the bak file is visible
+                MixAll.fsyncDirectory(Paths.get(bakFile.getParent()));
             }
 
-            tmpFile.renameTo(configFile);
-        } catch (IOException e) {
-            log.error("Failed to persist {}", temp, e);
-        } finally {
-            if (null != outputStream) {
-                try {
-                    outputStream.close();
-                } catch (IOException ignore) {
-                }
+            File dir = new File(configFile.getParent());
+            if (!dir.exists()) {
+                Files.createDirectories(dir.toPath());
             }
+
+            // persist metrics file
+            StringWriter stringWriter = new StringWriter();
+            write0(stringWriter);
+            try (RandomAccessFile randomAccessFile = new RandomAccessFile(config, "rw")) {
+                randomAccessFile.write(stringWriter.toString().getBytes(StandardCharsets.UTF_8));
+                randomAccessFile.getChannel().force(true);
+                // sync the directory, ensure that the config file is visible
+                MixAll.fsyncDirectory(Paths.get(configFile.getParent()));
+            }
+        } catch (Throwable t) {
+            log.error("Failed to persist", t);
         }
     }
 

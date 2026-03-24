@@ -33,4 +33,14 @@ public class GetAllTopicConfigResponseHeader implements CommandCustomHeader {
     @Override
     public void checkFields() throws RemotingCommandException {
     }
+
+    private Integer totalTopicNum;
+
+    public Integer getTotalTopicNum() {
+        return totalTopicNum;
+    }
+
+    public void setTotalTopicNum(Integer totalTopicNum) {
+        this.totalTopicNum = totalTopicNum;
+    }
 }

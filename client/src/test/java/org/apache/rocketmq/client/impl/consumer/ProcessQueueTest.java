@@ -158,7 +158,6 @@ public class ProcessQueueTest {
         ProcessQueue processQueue2 = createProcessQueue();
         assertEquals(processQueue1.getMsgAccCnt(), processQueue2.getMsgAccCnt());
         assertEquals(processQueue1.getTryUnlockTimes(), processQueue2.getTryUnlockTimes());
-        assertEquals(processQueue1.getLastLockTimestamp(), processQueue2.getLastLockTimestamp());
         assertEquals(processQueue1.getLastPullTimestamp(), processQueue2.getLastPullTimestamp());
     }
 
@@ -166,6 +165,7 @@ public class ProcessQueueTest {
         ProcessQueue result = new ProcessQueue();
         result.setMsgAccCnt(1);
         result.incTryUnlockTimes();
+        result.setLastPullTimestamp(10000L);
         return result;
     }
 

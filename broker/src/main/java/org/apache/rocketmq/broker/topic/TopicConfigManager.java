@@ -21,6 +21,7 @@ import java.util.Iterator;
 import java.util.List;
 import java.util.Map;
 import java.util.Map.Entry;
+import java.util.Objects;
 import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ConcurrentMap;
@@ -29,7 +30,7 @@ import java.util.concurrent.locks.Lock;
 import java.util.concurrent.locks.ReentrantLock;
 
 import com.google.common.collect.ImmutableMap;
-
+import com.google.common.collect.ImmutableSortedMap;
 import com.google.common.collect.Maps;
 import org.apache.commons.lang3.StringUtils;
 import org.apache.rocketmq.broker.BrokerController;
@@ -206,6 +207,26 @@ public class TopicConfigManager extends ConfigManager {
         {
             // TopicValidator.RMQ_SYS_TRANS_OP_HALF_TOPIC
             String topic = TopicValidator.RMQ_SYS_TRANS_OP_HALF_TOPIC;
+            TopicConfig topicConfig = new TopicConfig(topic);
+            TopicValidator.addSystemTopic(topic);
+            topicConfig.setReadQueueNums(1);
+            topicConfig.setWriteQueueNums(1);
+            putTopicConfig(topicConfig);
+        }
+
+        {
+            // TopicValidator.RMQ_SYS_ROCKSDB_TRANS_HALF_TOPIC
+            String topic = TopicValidator.RMQ_SYS_ROCKSDB_TRANS_HALF_TOPIC;
+            TopicConfig topicConfig = new TopicConfig(topic);
+            TopicValidator.addSystemTopic(topic);
+            topicConfig.setReadQueueNums(1);
+            topicConfig.setWriteQueueNums(1);
+            putTopicConfig(topicConfig);
+        }
+
+        {
+            // TopicValidator.RMQ_SYS_ROCKSDB_TRANS_OP_HALF_TOPIC
+            String topic = TopicValidator.RMQ_SYS_ROCKSDB_TRANS_OP_HALF_TOPIC;
             TopicConfig topicConfig = new TopicConfig(topic);
             TopicValidator.addSystemTopic(topic);
             topicConfig.setReadQueueNums(1);
@@ -626,9 +647,6 @@ public class TopicConfigManager extends ConfigManager {
         topicConfigWrapper.setTopicConfigTable(topicConfigTable);
         topicConfigWrapper.setTopicQueueMappingInfoMap(topicQueueMappingInfoMap);
         topicConfigWrapper.setDataVersion(this.getDataVersion());
-        if (this.brokerController.getBrokerConfig().isEnableSplitRegistration()) {
-            this.getDataVersion().nextVersion();
-        }
         return topicConfigWrapper;
     }
 
@@ -678,7 +696,7 @@ public class TopicConfigManager extends ConfigManager {
     public String encode(final boolean prettyFormat) {
         TopicConfigSerializeWrapper topicConfigSerializeWrapper = new TopicConfigSerializeWrapper();
         topicConfigSerializeWrapper.setTopicConfigTable(this.topicConfigTable);
-        topicConfigSerializeWrapper.setDataVersion(this.dataVersion);
+        topicConfigSerializeWrapper.setDataVersion(getDataVersion());
         return topicConfigSerializeWrapper.toJson(prettyFormat);
     }
 
@@ -701,6 +719,28 @@ public class TopicConfigManager extends ConfigManager {
 
     public ConcurrentMap<String, TopicConfig> getTopicConfigTable() {
         return topicConfigTable;
+    }
+
+    public ConcurrentHashMap<String, TopicConfig> subTopicConfigTable(String dataVersion, int topicSeq,
+        int maxTopicNum) {
+        // [topicSeq, topicSeq + maxTopicNum)
+        int beginIndex = topicSeq;
+        if (beginIndex != 0 && (StringUtils.isBlank(dataVersion) || !Objects.equals(DataVersion.fromJson(dataVersion, DataVersion.class), getDataVersion()))) {
+            beginIndex = 0;
+            log.info("get sub topic config table from {} due to {}", beginIndex,
+                StringUtils.isBlank(dataVersion) ? "DataVersion Empty" : "DataVersion Changed");
+        }
+
+        ConcurrentHashMap<String, TopicConfig> subTopicConfigTable = new ConcurrentHashMap<>();
+        if (beginIndex < topicConfigTable.size()) {
+            int endIndex = Math.min(beginIndex + maxTopicNum, topicConfigTable.size());
+
+            ImmutableSortedMap<String, TopicConfig> sortedMap = ImmutableSortedMap.copyOf(topicConfigTable);
+            subTopicConfigTable.putAll(sortedMap.subMap(sortedMap.keySet().asList().get(beginIndex),true,
+                sortedMap.keySet().asList().get(endIndex - 1),true));
+        }
+
+        return subTopicConfigTable;
     }
 
     private Map<String, String> request(TopicConfig topicConfig) {

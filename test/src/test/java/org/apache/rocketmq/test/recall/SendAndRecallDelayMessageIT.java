@@ -17,6 +17,13 @@
 
 package org.apache.rocketmq.test.recall;
 
+import static org.awaitility.Awaitility.await;
+import static org.junit.Assert.assertEquals;
+
+import java.util.ArrayList;
+import java.util.Arrays;
+import java.util.List;
+import java.util.concurrent.TimeUnit;
 import org.apache.rocketmq.client.consumer.PopResult;
 import org.apache.rocketmq.client.consumer.PopStatus;
 import org.apache.rocketmq.client.producer.SendResult;
@@ -33,17 +40,12 @@ import org.apache.rocketmq.test.factory.ConsumerFactory;
 import org.apache.rocketmq.test.listener.rmq.concurrent.RMQNormalListener;
 import org.apache.rocketmq.test.util.MQRandomUtils;
 import org.junit.AfterClass;
-import org.junit.BeforeClass;
+import org.junit.Before;
 import org.junit.Test;
+import org.junit.runner.RunWith;
+import org.junit.runners.Parameterized;
 
-import java.util.ArrayList;
-import java.util.Arrays;
-import java.util.List;
-import java.util.concurrent.TimeUnit;
-
-import static org.junit.Assert.assertEquals;
-import static org.awaitility.Awaitility.await;
-
+@RunWith(Parameterized.class)
 public class SendAndRecallDelayMessageIT extends BaseConf {
 
     private static String initTopic;
@@ -51,8 +53,23 @@ public class SendAndRecallDelayMessageIT extends BaseConf {
     private static RMQNormalProducer producer;
     private static RMQPopConsumer popConsumer;
 
-    @BeforeClass
-    public static void init() {
+    private final boolean appendTopicForTimerDeleteKey;
+
+    public SendAndRecallDelayMessageIT(boolean appendTopicForTimerDeleteKey) {
+        this.appendTopicForTimerDeleteKey = appendTopicForTimerDeleteKey;
+    }
+
+    @Parameterized.Parameters
+    public static List<Object[]> params() {
+        List<Object[]> result = new ArrayList<>();
+        result.add(new Object[] {false});
+        result.add(new Object[] {true});
+        return result;
+    }
+
+    @Before
+    public void init() {
+        brokerController1.getMessageStoreConfig().setAppendTopicForTimerDeleteKey(appendTopicForTimerDeleteKey);
         initTopic = initTopic();
         consumerGroup = initConsumerGroup();
         producer = getProducer(NAMESRV_ADDR, initTopic);
@@ -127,6 +144,9 @@ public class SendAndRecallDelayMessageIT extends BaseConf {
 
     @Test
     public void testSendAndRecall_ukCollision() throws Exception {
+        if (!appendTopicForTimerDeleteKey) { // skip
+            return;
+        }
         int delaySecond = 5;
         String topic = MQRandomUtils.getRandomTopic();
         String collisionTopic = MQRandomUtils.getRandomTopic();

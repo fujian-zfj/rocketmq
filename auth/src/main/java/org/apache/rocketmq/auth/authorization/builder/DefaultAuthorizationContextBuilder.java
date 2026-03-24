@@ -31,6 +31,7 @@ import apache.rocketmq.v2.SendMessageRequest;
 import apache.rocketmq.v2.Subscription;
 import apache.rocketmq.v2.SubscriptionEntry;
 import apache.rocketmq.v2.TelemetryCommand;
+import apache.rocketmq.v2.SyncLiteSubscriptionRequest;
 import com.google.protobuf.GeneratedMessageV3;
 import io.grpc.Metadata;
 import io.netty.channel.ChannelHandlerContext;
@@ -38,6 +39,7 @@ import java.lang.reflect.Field;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collections;
+import java.util.EnumSet;
 import java.util.HashMap;
 import java.util.List;
 import org.apache.commons.collections.CollectionUtils;
@@ -84,6 +86,8 @@ public class DefaultAuthorizationContextBuilder implements AuthorizationContextB
     private static final String B = "b";
     private static final String CONSUMER_GROUP = "consumerGroup";
     private final AuthConfig authConfig;
+    private static final EnumSet<ClientType> CONSUMER_CLIENT_TYPES =
+            EnumSet.of(ClientType.PUSH_CONSUMER, ClientType.SIMPLE_CONSUMER, ClientType.PULL_CONSUMER);
 
     private final RequestHeaderRegistry requestHeaderRegistry;
 
@@ -123,6 +127,13 @@ public class DefaultAuthorizationContextBuilder implements AuthorizationContextB
                 throw new AuthorizationException("messageQueue is null.");
             }
             result = newSubContexts(metadata, request.getGroup(), request.getMessageQueue().getTopic());
+        }
+        if (message instanceof SyncLiteSubscriptionRequest) {
+            SyncLiteSubscriptionRequest request = (SyncLiteSubscriptionRequest) message;
+            if (request.getLiteTopicSetCount() <= 0) {
+                return null;
+            }
+            result = newSubContexts(metadata, request.getGroup(), request.getTopic());
         }
         if (message instanceof AckMessageRequest) {
             AckMessageRequest request = (AckMessageRequest) message;
@@ -192,11 +203,7 @@ public class DefaultAuthorizationContextBuilder implements AuthorizationContextB
                     break;
                 case RequestCode.SEND_MESSAGE:
                     if (NamespaceUtil.isRetryTopic(fields.get(TOPIC))) {
-                        if (StringUtils.isNotBlank(fields.get(GROUP))) {
-                            group = Resource.ofGroup(fields.get(GROUP));
-                        } else {
-                            group = Resource.ofGroup(fields.get(TOPIC));
-                        }
+                        group = Resource.ofGroup(fields.get(TOPIC));
                         result.add(DefaultAuthorizationContext.of(subject, group, Action.SUB, sourceIp));
                     } else {
                         topic = Resource.ofTopic(fields.get(TOPIC));
@@ -206,11 +213,7 @@ public class DefaultAuthorizationContextBuilder implements AuthorizationContextB
                 case RequestCode.SEND_MESSAGE_V2:
                 case RequestCode.SEND_BATCH_MESSAGE:
                     if (NamespaceUtil.isRetryTopic(fields.get(B))) {
-                        if (StringUtils.isNotBlank(fields.get(A))) {
-                            group = Resource.ofGroup(fields.get(A));
-                        } else {
-                            group = Resource.ofGroup(fields.get(B));
-                        }
+                        group = Resource.ofGroup(fields.get(B));
                         result.add(DefaultAuthorizationContext.of(subject, group, Action.SUB, sourceIp));
                     } else {
                         topic = Resource.ofTopic(fields.get(B));
@@ -306,7 +309,7 @@ public class DefaultAuthorizationContextBuilder implements AuthorizationContextB
                     }
                     break;
                 case RequestCode.UNLOCK_BATCH_MQ:
-                    UnlockBatchRequestBody unlockBatchRequestBody = LockBatchRequestBody.decode(command.getBody(), UnlockBatchRequestBody.class);
+                    UnlockBatchRequestBody unlockBatchRequestBody = UnlockBatchRequestBody.decode(command.getBody(), UnlockBatchRequestBody.class);
                     group = Resource.ofGroup(unlockBatchRequestBody.getConsumerGroup());
                     result.add(DefaultAuthorizationContext.of(subject, group, Action.SUB, sourceIp));
                     if (CollectionUtils.isNotEmpty(unlockBatchRequestBody.getMqSet())) {
@@ -438,8 +441,7 @@ public class DefaultAuthorizationContextBuilder implements AuthorizationContextB
     }
 
     private boolean isConsumerClientType(ClientType clientType) {
-        return Arrays.asList(ClientType.PUSH_CONSUMER, ClientType.SIMPLE_CONSUMER, ClientType.PULL_CONSUMER)
-            .contains(clientType);
+        return CONSUMER_CLIENT_TYPES.contains(clientType);
     }
 
     private static List<DefaultAuthorizationContext> newPubContext(Metadata metadata, apache.rocketmq.v2.Resource topic) {

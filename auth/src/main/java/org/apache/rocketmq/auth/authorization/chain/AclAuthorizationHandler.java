@@ -133,20 +133,17 @@ public class AclAuthorizationHandler implements Handler<DefaultAuthorizationCont
             if (r1.getResourcePattern() == ResourcePattern.PREFIXED) {
                 String n1 = r1.getResourceName();
                 String n2 = r2.getResourceName();
-                compare = Integer.compare(n1.length(), n2.length());
+                compare = -1 * Integer.compare(n1.length(), n2.length());
             }
         } else {
             if (r1.getResourcePattern() == ResourcePattern.LITERAL) {
-                compare = 1;
-            }
-            if (r1.getResourcePattern() == ResourcePattern.LITERAL) {
                 compare = -1;
-            }
-            if (r1.getResourcePattern() == ResourcePattern.PREFIXED) {
+            } else if (r2.getResourcePattern() == ResourcePattern.LITERAL) {
                 compare = 1;
-            }
-            if (r1.getResourcePattern() == ResourcePattern.PREFIXED) {
+            } else if (r1.getResourcePattern() == ResourcePattern.PREFIXED) {
                 compare = -1;
+            } else if (r2.getResourcePattern() == ResourcePattern.PREFIXED) {
+                compare = 1;
             }
         }
 
@@ -157,7 +154,11 @@ public class AclAuthorizationHandler implements Handler<DefaultAuthorizationCont
         // the decision deny has higher priority
         Decision d1 = o1.getDecision();
         Decision d2 = o2.getDecision();
-        return d1 == Decision.DENY ? 1 : d2 == Decision.DENY ? -1 : 0;
+
+        if (d1 != d2) {
+            return d1 == Decision.DENY ? -1 : 1;
+        }
+        return 0;
     }
 
     private static void throwException(DefaultAuthorizationContext context, String detail) {

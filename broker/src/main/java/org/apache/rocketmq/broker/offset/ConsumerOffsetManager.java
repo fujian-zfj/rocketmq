@@ -16,6 +16,7 @@
  */
 package org.apache.rocketmq.broker.offset;
 
+import com.google.common.base.Strings;
 import com.google.common.collect.Maps;
 import java.util.HashMap;
 import java.util.HashSet;
@@ -26,9 +27,6 @@ import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ConcurrentMap;
 import java.util.concurrent.atomic.AtomicLong;
-
-import com.google.common.base.Strings;
-
 import java.util.function.Function;
 import org.apache.rocketmq.broker.BrokerController;
 import org.apache.rocketmq.broker.BrokerPathConfigHelper;
@@ -50,7 +48,7 @@ public class ConsumerOffsetManager extends ConfigManager {
     protected ConcurrentMap<String/* topic@group */, ConcurrentMap<Integer, Long>> offsetTable =
         new ConcurrentHashMap<>(512);
 
-    private final ConcurrentMap<String, ConcurrentMap<Integer, Long>> resetOffsetTable =
+    protected final ConcurrentMap<String, ConcurrentMap<Integer, Long>> resetOffsetTable =
         new ConcurrentHashMap<>(512);
 
     private final ConcurrentMap<String/* topic@group */, ConcurrentMap<Integer, Long>> pullOffsetTable =
@@ -58,7 +56,7 @@ public class ConsumerOffsetManager extends ConfigManager {
 
     protected transient BrokerController brokerController;
 
-    private final transient AtomicLong versionChangeCounter = new AtomicLong(0);
+    protected final transient AtomicLong versionChangeCounter = new AtomicLong(0);
 
     public ConsumerOffsetManager() {
     }
@@ -67,7 +65,7 @@ public class ConsumerOffsetManager extends ConfigManager {
         this.brokerController = brokerController;
     }
 
-    protected void removeConsumerOffset(String topicAtGroup) {
+    public void removeConsumerOffset(String topicAtGroup) {
 
     }
 
@@ -97,6 +95,8 @@ public class ConsumerOffsetManager extends ConfigManager {
                 if (arrays.length == 2 && topic.equals(arrays[0])) {
                     it.remove();
                     removeConsumerOffset(topicAtGroup);
+                    pullOffsetTable.remove(topicAtGroup);
+                    resetOffsetTable.remove(topicAtGroup);
                     LOG.warn("Clean topic's offset, {}, {}", topicAtGroup, next.getValue());
                 }
             }
@@ -205,7 +205,7 @@ public class ConsumerOffsetManager extends ConfigManager {
     private void commitOffset(final String clientHost, final String key, final int queueId, final long offset) {
         ConcurrentMap<Integer, Long> map = this.offsetTable.get(key);
         if (null == map) {
-            map = new ConcurrentHashMap<>(32);
+            map = new ConcurrentHashMap<>(2);
             map.put(queueId, offset);
             this.offsetTable.put(key, map);
         } else {
@@ -215,8 +215,7 @@ public class ConsumerOffsetManager extends ConfigManager {
             }
         }
         if (versionChangeCounter.incrementAndGet() % brokerController.getBrokerConfig().getConsumerOffsetUpdateVersionStep() == 0) {
-            long stateMachineVersion = brokerController.getMessageStore() != null ? brokerController.getMessageStore().getStateMachineVersion() : 0;
-            dataVersion.nextVersion(stateMachineVersion);
+            updateDataVersion();
         }
     }
 
@@ -283,6 +282,10 @@ public class ConsumerOffsetManager extends ConfigManager {
         return offset;
     }
 
+    public void clearPullOffset(final String group, final String topic) {
+        this.pullOffsetTable.remove(topic + TOPIC_GROUP_SEPARATOR + group);
+    }
+
     @Override
     public String encode() {
         return this.encode(false);
@@ -315,6 +318,10 @@ public class ConsumerOffsetManager extends ConfigManager {
 
     public void setOffsetTable(ConcurrentMap<String, ConcurrentMap<Integer, Long>> offsetTable) {
         this.offsetTable = offsetTable;
+    }
+
+    public ConcurrentMap<String, ConcurrentMap<Integer, Long>> getPullOffsetTable() {
+        return pullOffsetTable;
     }
 
     public Map<Integer, Long> queryMinOffsetInAllGroup(final String topic, final String filterGroups) {
@@ -370,6 +377,12 @@ public class ConsumerOffsetManager extends ConfigManager {
 
     public DataVersion getDataVersion() {
         return dataVersion;
+    }
+
+    public void updateDataVersion() {
+        long stateMachineVersion = brokerController.getMessageStore() != null ?
+            brokerController.getMessageStore().getStateMachineVersion() : 0;
+        dataVersion.nextVersion(stateMachineVersion);
     }
 
     public void setDataVersion(DataVersion dataVersion) {

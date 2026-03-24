@@ -20,6 +20,8 @@ import com.alibaba.fastjson2.JSON;
 import org.apache.commons.lang3.tuple.Triple;
 import org.apache.rocketmq.broker.BrokerController;
 import org.apache.rocketmq.broker.failover.EscapeBridge;
+import org.apache.rocketmq.broker.metrics.BrokerMetricsManager;
+import org.apache.rocketmq.broker.metrics.PopMetricsManager;
 import org.apache.rocketmq.broker.offset.ConsumerOffsetManager;
 import org.apache.rocketmq.broker.subscription.SubscriptionGroupManager;
 import org.apache.rocketmq.broker.topic.TopicConfigManager;
@@ -98,6 +100,10 @@ public class PopReviveServiceTest {
     private BrokerController brokerController;
     @Mock
     private EscapeBridge escapeBridge;
+    @Mock
+    private BrokerMetricsManager brokerMetricsManager;
+    @Mock
+    private PopMetricsManager popMetricsManager;
     private PopMessageProcessor popMessageProcessor;
 
     private BrokerConfig brokerConfig;
@@ -120,6 +126,10 @@ public class PopReviveServiceTest {
         when(topicConfigManager.selectTopicConfig(anyString())).thenReturn(new TopicConfig());
         when(subscriptionGroupManager.findSubscriptionGroupConfig(anyString())).thenReturn(new SubscriptionGroupConfig());
 
+        // Initialize BrokerMetricsManager for tests
+        when(brokerController.getBrokerMetricsManager()).thenReturn(brokerMetricsManager);
+        when(brokerMetricsManager.getPopMetricsManager()).thenReturn(popMetricsManager);
+
         popMessageProcessor = new PopMessageProcessor(brokerController); // a real one, not mock
         when(brokerController.getPopMessageProcessor()).thenReturn(popMessageProcessor);
 
@@ -133,7 +143,7 @@ public class PopReviveServiceTest {
         long maxReviveOffset = 4;
 
         when(consumerOffsetManager.queryOffset(PopAckConstants.REVIVE_GROUP, REVIVE_TOPIC, REVIVE_QUEUE_ID))
-            .thenReturn(0L);
+                .thenReturn(0L);
         List<MessageExt> reviveMessageExtList = new ArrayList<>();
         long basePopTime = System.currentTimeMillis();
         {
@@ -170,7 +180,7 @@ public class PopReviveServiceTest {
         long maxReviveOffset = 4;
 
         when(consumerOffsetManager.queryOffset(PopAckConstants.REVIVE_GROUP, REVIVE_TOPIC, REVIVE_QUEUE_ID))
-            .thenReturn(0L);
+                .thenReturn(0L);
         List<MessageExt> reviveMessageExtList = new ArrayList<>();
         long basePopTime = System.currentTimeMillis() - brokerConfig.getReviveAckWaitMs() * 2;
         {
@@ -207,7 +217,7 @@ public class PopReviveServiceTest {
         long maxReviveOffset = 4;
 
         when(consumerOffsetManager.queryOffset(PopAckConstants.REVIVE_GROUP, REVIVE_TOPIC, REVIVE_QUEUE_ID))
-            .thenReturn(0L);
+                .thenReturn(0L);
         List<MessageExt> reviveMessageExtList = new ArrayList<>();
         long basePopTime = System.currentTimeMillis() - brokerConfig.getReviveAckWaitMs() * 2;
         {
@@ -264,7 +274,7 @@ public class PopReviveServiceTest {
         AtomicLong actualInvisibleTime = new AtomicLong(0L);
 
         when(escapeBridge.getMessageAsync(anyString(), anyLong(), anyInt(), anyString(), anyBoolean()))
-                .thenReturn(CompletableFuture.completedFuture(Triple.of(new MessageExt(), "", false)));
+            .thenReturn(CompletableFuture.completedFuture(Triple.of(new MessageExt(), "", false)));
         when(escapeBridge.putMessageToSpecificQueue(any(MessageExtBrokerInner.class))).thenAnswer(invocation -> {
             MessageExtBrokerInner msg = invocation.getArgument(0);
             actualRetryTopic.append(msg.getTopic());
@@ -279,6 +289,10 @@ public class PopReviveServiceTest {
         });
 
         popReviveService.mergeAndRevive(reviveObj);
+        
+        // Wait for async operations to complete
+        Thread.sleep(1000);
+        
         Assert.assertEquals(KeyBuilder.buildPopRetryTopic(TOPIC, GROUP, false), actualRetryTopic.toString());
         Assert.assertEquals(REVIVE_TOPIC, actualReviveTopic.toString());
         Assert.assertEquals(INVISIBLE_TIME + 10 * 1000L, actualInvisibleTime.get()); // first interval is 10s
@@ -510,14 +524,14 @@ public class PopReviveServiceTest {
     }
 
     public static MessageExtBrokerInner buildAckMsg(AckMsg ackMsg, long deliverMs, long reviveOffset,
-        long deliverTime) {
+                                                    long deliverTime) {
         MessageExtBrokerInner messageExtBrokerInner = buildAckInnerMessage(
-            REVIVE_TOPIC,
-            ackMsg,
-            REVIVE_QUEUE_ID,
-            STORE_HOST,
-            deliverMs,
-            PopMessageProcessor.genAckUniqueId(ackMsg)
+                REVIVE_TOPIC,
+                ackMsg,
+                REVIVE_QUEUE_ID,
+                STORE_HOST,
+                deliverMs,
+                PopMessageProcessor.genAckUniqueId(ackMsg)
         );
         messageExtBrokerInner.setQueueOffset(reviveOffset);
         messageExtBrokerInner.setDeliverTimeMs(deliverMs);
@@ -526,7 +540,7 @@ public class PopReviveServiceTest {
     }
 
     public static MessageExtBrokerInner buildAckInnerMessage(String reviveTopic, AckMsg ackMsg, int reviveQid,
-        SocketAddress host, long deliverMs, String ackUniqueId) {
+                                                             SocketAddress host, long deliverMs, String ackUniqueId) {
         MessageExtBrokerInner msgInner = new MessageExtBrokerInner();
         msgInner.setTopic(reviveTopic);
         msgInner.setBody(JSON.toJSONString(ackMsg).getBytes(DataConverter.CHARSET_UTF8));

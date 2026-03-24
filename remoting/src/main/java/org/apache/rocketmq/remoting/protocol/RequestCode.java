@@ -73,17 +73,6 @@ public class RequestCode {
 
     public static final int GET_CLIENT_CONFIG = 47;
 
-    public static final int UPDATE_AND_CREATE_ACL_CONFIG = 50;
-
-    public static final int DELETE_ACL_CONFIG = 51;
-
-    public static final int GET_BROKER_CLUSTER_ACL_INFO = 52;
-
-    public static final int UPDATE_GLOBAL_WHITE_ADDRS_CONFIG = 53;
-
-    @Deprecated
-    public static final int GET_BROKER_CLUSTER_ACL_CONFIG = 54;
-
     public static final int GET_TIMER_CHECK_POINT = 60;
 
     public static final int GET_TIMER_METRICS = 61;
@@ -96,6 +85,18 @@ public class RequestCode {
     public static final int NOTIFICATION = 200054;
     public static final int POLLING_INFO = 200055;
     public static final int POP_ROLLBACK = 200056;
+
+    public static final int POP_LITE_MESSAGE = 200070;
+    public static final int LITE_SUBSCRIPTION_CTL = 200071;
+    public static final int ACK_LITE_MESSAGE = 200072;
+    public static final int NOTIFY_UNSUBSCRIBE_LITE = 200073;
+    // lite admin api
+    public static final int GET_BROKER_LITE_INFO = 200074;
+    public static final int GET_PARENT_TOPIC_INFO = 200075;
+    public static final int GET_LITE_TOPIC_INFO = 200076;
+    public static final int GET_LITE_CLIENT_INFO = 200077;
+    public static final int GET_LITE_GROUP_INFO = 200078;
+    public static final int TRIGGER_LITE_DISPATCH = 200079;
 
     public static final int PUT_KV_CONFIG = 100;
 
@@ -213,9 +214,9 @@ public class RequestCode {
     public static final int PUSH_REPLY_MESSAGE_TO_CLIENT = 326;
 
     public static final int ADD_WRITE_PERM_OF_BROKER = 327;
-    
+
     public static final int GET_ALL_PRODUCER_INFO = 328;
-    
+
     public static final int DELETE_EXPIRED_COMMITLOG = 329;
 
     public static final int GET_TOPIC_CONFIG = 351;
@@ -308,4 +309,6 @@ public class RequestCode {
     public static final int AUTH_DELETE_ACL = 3008;
     public static final int AUTH_GET_ACL = 3009;
     public static final int AUTH_LIST_ACL = 3010;
+
+    public static final int SWITCH_TIMER_ENGINE = 5001;
 }

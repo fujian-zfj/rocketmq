@@ -23,9 +23,14 @@ import java.nio.ByteBuffer;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.List;
+import java.util.Map;
+import java.util.Objects;
+import java.util.Optional;
 import java.util.Set;
 import java.util.concurrent.ArrayBlockingQueue;
 import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.ConcurrentMap;
 import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.ExecutorService;
@@ -41,7 +46,6 @@ import org.apache.rocketmq.client.exception.MQBrokerException;
 import org.apache.rocketmq.client.impl.consumer.PullResultExt;
 import org.apache.rocketmq.client.producer.SendResult;
 import org.apache.rocketmq.client.producer.SendStatus;
-import org.apache.rocketmq.common.AbstractBrokerRunnable;
 import org.apache.rocketmq.common.BrokerIdentity;
 import org.apache.rocketmq.common.LockCallback;
 import org.apache.rocketmq.common.MixAll;
@@ -102,6 +106,10 @@ import org.apache.rocketmq.remoting.protocol.body.TopicConfigSerializeWrapper;
 import org.apache.rocketmq.remoting.protocol.body.UnlockBatchRequestBody;
 import org.apache.rocketmq.remoting.protocol.header.ExchangeHAInfoRequestHeader;
 import org.apache.rocketmq.remoting.protocol.header.ExchangeHAInfoResponseHeader;
+import org.apache.rocketmq.remoting.protocol.header.GetAllSubscriptionGroupRequestHeader;
+import org.apache.rocketmq.remoting.protocol.header.GetAllSubscriptionGroupResponseHeader;
+import org.apache.rocketmq.remoting.protocol.header.GetAllTopicConfigRequestHeader;
+import org.apache.rocketmq.remoting.protocol.header.GetAllTopicConfigResponseHeader;
 import org.apache.rocketmq.remoting.protocol.header.GetBrokerMemberGroupRequestHeader;
 import org.apache.rocketmq.remoting.protocol.header.GetMaxOffsetRequestHeader;
 import org.apache.rocketmq.remoting.protocol.header.GetMaxOffsetResponseHeader;
@@ -139,6 +147,8 @@ import org.apache.rocketmq.remoting.protocol.namesrv.RegisterBrokerResult;
 import org.apache.rocketmq.remoting.protocol.route.BrokerData;
 import org.apache.rocketmq.remoting.protocol.route.QueueData;
 import org.apache.rocketmq.remoting.protocol.route.TopicRouteData;
+import org.apache.rocketmq.remoting.protocol.statictopic.TopicQueueMappingDetail;
+import org.apache.rocketmq.remoting.protocol.subscription.SubscriptionGroupConfig;
 import org.apache.rocketmq.remoting.rpc.ClientMetadata;
 import org.apache.rocketmq.remoting.rpc.RpcClient;
 import org.apache.rocketmq.remoting.rpc.RpcClientImpl;
@@ -345,18 +355,14 @@ public class BrokerOuterAPI {
             requestHeader.setClusterName(clusterName);
 
             for (final String namesrvAddr : nameServerAddressList) {
-                brokerOuterExecutor.execute(new AbstractBrokerRunnable(new BrokerIdentity(clusterName, brokerName, brokerId, isInBrokerContainer)) {
+                brokerOuterExecutor.execute(() -> {
+                    RemotingCommand request = RemotingCommand.createRequestCommand(RequestCode.QUERY_DATA_VERSION, requestHeader);
+                    request.setBody(dataVersion.encode());
 
-                    @Override
-                    public void run0() {
-                        RemotingCommand request = RemotingCommand.createRequestCommand(RequestCode.QUERY_DATA_VERSION, requestHeader);
-                        request.setBody(dataVersion.encode());
-
-                        try {
-                            BrokerOuterAPI.this.remotingClient.invokeOneway(namesrvAddr, request, timeoutMillis);
-                        } catch (Exception e) {
-                            LOGGER.error("sendHeartbeat Exception " + namesrvAddr, e);
-                        }
+                    try {
+                        BrokerOuterAPI.this.remotingClient.invokeOneway(namesrvAddr, request, timeoutMillis);
+                    } catch (Exception e) {
+                        LOGGER.error("sendHeartbeat Exception " + namesrvAddr, e);
                     }
                 });
             }
@@ -378,9 +384,9 @@ public class BrokerOuterAPI {
 
         if (nameServerAddressList != null && nameServerAddressList.size() > 0) {
             for (final String namesrvAddr : nameServerAddressList) {
-                brokerOuterExecutor.execute(new AbstractBrokerRunnable(new BrokerIdentity(clusterName, brokerName, brokerId, isInBrokerContainer)) {
+                brokerOuterExecutor.execute(new Runnable() {
                     @Override
-                    public void run0() {
+                    public void run() {
                         RemotingCommand request = RemotingCommand.createRequestCommand(RequestCode.BROKER_HEARTBEAT, requestHeader);
 
                         try {
@@ -521,9 +527,9 @@ public class BrokerOuterAPI {
             requestHeader.setBodyCrc32(bodyCrc32);
             final CountDownLatch countDownLatch = new CountDownLatch(nameServerAddressList.size());
             for (final String namesrvAddr : nameServerAddressList) {
-                brokerOuterExecutor.execute(new AbstractBrokerRunnable(brokerIdentity) {
+                brokerOuterExecutor.execute(new Runnable() {
                     @Override
-                    public void run0() {
+                    public void run() {
                         try {
                             RegisterBrokerResult result = registerBroker(namesrvAddr, oneway, timeoutMills, requestHeader, body);
                             if (result != null) {
@@ -708,9 +714,9 @@ public class BrokerOuterAPI {
         if (nameServerAddressList != null && nameServerAddressList.size() > 0) {
             final CountDownLatch countDownLatch = new CountDownLatch(nameServerAddressList.size());
             for (final String namesrvAddr : nameServerAddressList) {
-                brokerOuterExecutor.execute(new AbstractBrokerRunnable(new BrokerIdentity(clusterName, brokerName, brokerId, isInBrokerContainer)) {
+                brokerOuterExecutor.execute(new Runnable() {
                     @Override
-                    public void run0() {
+                    public void run() {
                         try {
                             QueryDataVersionRequestHeader requestHeader = new QueryDataVersionRequestHeader();
                             requestHeader.setBrokerAddr(brokerAddr);
@@ -761,22 +767,86 @@ public class BrokerOuterAPI {
         return changedList;
     }
 
-    public TopicConfigAndMappingSerializeWrapper getAllTopicConfig(
-        final String addr) throws RemotingConnectException, RemotingSendRequestException,
-        RemotingTimeoutException, InterruptedException, MQBrokerException {
-        RemotingCommand request = RemotingCommand.createRequestCommand(RequestCode.GET_ALL_TOPIC_CONFIG, null);
+    public TopicConfigAndMappingSerializeWrapper getAllTopicConfig(final String addr)
+        throws RemotingConnectException, RemotingSendRequestException, RemotingTimeoutException,
+        InterruptedException, MQBrokerException, RemotingCommandException {
 
-        RemotingCommand response = this.remotingClient.invokeSync(MixAll.brokerVIPChannel(true, addr), request, 3000);
-        assert response != null;
-        switch (response.getCode()) {
-            case ResponseCode.SUCCESS: {
-                return TopicConfigSerializeWrapper.decode(response.getBody(), TopicConfigAndMappingSerializeWrapper.class);
+        DataVersion topicConfigDataVersion = null;
+        DataVersion mappingDataVersion = null;
+        long timeoutMills = getTimeoutMillis();
+        int topicSeq = 0;
+        long beginTime = System.nanoTime();
+        ConcurrentHashMap<String, TopicConfig> topicConfigTable = new ConcurrentHashMap<>();
+        Map<String, TopicQueueMappingDetail> topicQueueMappingDetailMap = new ConcurrentHashMap<>();
+        while (true) {
+            long leftTime = timeoutMills - TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - beginTime);
+            if (leftTime < 0) {
+                throw new RemotingTimeoutException("invokeSync call timeout");
             }
-            default:
-                break;
+
+            GetAllTopicConfigRequestHeader requestHeader = new GetAllTopicConfigRequestHeader();
+            requestHeader.setTopicSeq(topicSeq);
+            requestHeader.setMaxTopicNum(getMaxPageSize());
+            requestHeader.setDataVersion(Optional.ofNullable(topicConfigDataVersion).
+                map(DataVersion::toJson).orElse(StringUtils.EMPTY));
+            LOGGER.info("getAllTopicConfig from seq {}, max {}, dataVersion {}",
+                    topicSeq, requestHeader.getMaxTopicNum(), requestHeader.getDataVersion());
+            RemotingCommand request = RemotingCommand.createRequestCommand(RequestCode.GET_ALL_TOPIC_CONFIG, requestHeader);
+
+            RemotingCommand response = this.remotingClient.invokeSync(
+                MixAll.brokerVIPChannel(true, addr), request, 30000);
+
+            assert response != null;
+            if (response.getCode() == SUCCESS) {
+                TopicConfigAndMappingSerializeWrapper topicConfigSerializeWrapper =
+                    TopicConfigAndMappingSerializeWrapper.decode(response.getBody(), TopicConfigAndMappingSerializeWrapper.class);
+                topicConfigTable.putAll(topicConfigSerializeWrapper.getTopicConfigTable());
+                topicQueueMappingDetailMap.putAll(topicConfigSerializeWrapper.getTopicQueueMappingDetailMap());
+                topicSeq += topicConfigSerializeWrapper.getTopicConfigTable().size();
+
+
+                DataVersion newDataVersion = topicConfigSerializeWrapper.getDataVersion();
+                if (topicConfigDataVersion == null) {
+                    // fill dataVersion before break the loop to compatible with old version server
+                    topicConfigDataVersion = newDataVersion;
+                    mappingDataVersion = topicConfigSerializeWrapper.getMappingDataVersion();
+                }
+
+                GetAllTopicConfigResponseHeader responseHeader =
+                    response.decodeCommandCustomHeader(GetAllTopicConfigResponseHeader.class);
+                Integer totalTopicNum = Optional.ofNullable(responseHeader)
+                    .map(GetAllTopicConfigResponseHeader::getTotalTopicNum).orElse(null);
+
+                if (Objects.isNull(totalTopicNum)) {       // compatible with old version server
+                    // the server side don't support totalTopicNum, all data is returned
+                    break;
+                }
+
+                if (!Objects.equals(topicConfigDataVersion, newDataVersion)) {
+                    LOGGER.error("dataVersion changed, currentDataVersion: {}, newDataVersion: {}", topicConfigDataVersion, newDataVersion);
+                    topicConfigDataVersion = newDataVersion;
+                    mappingDataVersion = topicConfigSerializeWrapper.getMappingDataVersion();
+                    topicSeq = 0;
+                    topicConfigTable.clear();
+                    continue;
+                }
+
+                if (topicSeq >= totalTopicNum - 1) {
+                    LOGGER.info("get all topic config, totalTopicNum: {}", totalTopicNum);
+                    break;
+                }
+            } else {
+                throw new MQBrokerException(response.getCode(), response.getRemark(), addr);
+            }
+
         }
 
-        throw new MQBrokerException(response.getCode(), response.getRemark(), addr);
+        TopicConfigAndMappingSerializeWrapper topicConfigSerializeWrapper = new TopicConfigAndMappingSerializeWrapper();
+        topicConfigSerializeWrapper.setDataVersion(topicConfigDataVersion);
+        topicConfigSerializeWrapper.setTopicConfigTable(topicConfigTable);
+        topicConfigSerializeWrapper.setMappingDataVersion(mappingDataVersion);
+        topicConfigSerializeWrapper.setTopicQueueMappingDetailMap(topicQueueMappingDetailMap);
+        return topicConfigSerializeWrapper;
     }
 
     public TimerCheckpoint getTimerCheckPoint(
@@ -849,21 +919,82 @@ public class BrokerOuterAPI {
         throw new MQBrokerException(response.getCode(), response.getRemark(), addr);
     }
 
-    public SubscriptionGroupWrapper getAllSubscriptionGroupConfig(
-        final String addr) throws InterruptedException, RemotingTimeoutException,
-        RemotingSendRequestException, RemotingConnectException, MQBrokerException {
-        RemotingCommand request = RemotingCommand.createRequestCommand(RequestCode.GET_ALL_SUBSCRIPTIONGROUP_CONFIG, null);
-        RemotingCommand response = this.remotingClient.invokeSync(addr, request, 3000);
-        assert response != null;
-        switch (response.getCode()) {
-            case ResponseCode.SUCCESS: {
-                return SubscriptionGroupWrapper.decode(response.getBody(), SubscriptionGroupWrapper.class);
+    public SubscriptionGroupWrapper getAllSubscriptionGroupConfig(final String addr)
+        throws InterruptedException, RemotingTimeoutException, RemotingSendRequestException,
+        RemotingConnectException, MQBrokerException, RemotingCommandException {
+
+        long timeoutMills = getTimeoutMillis();
+        DataVersion currentDataVersion = null;
+        int groupSeq = 0;
+        long beginTime = System.nanoTime();
+        ConcurrentMap<String, SubscriptionGroupConfig> subscriptionGroupTable = new ConcurrentHashMap<>();
+        ConcurrentMap<String, ConcurrentMap<String, Integer>> forbiddenTable = new ConcurrentHashMap<>();
+
+        while (true) {
+            long leftTime = timeoutMills - TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - beginTime);
+            if (leftTime < 0) {
+                throw new RemotingTimeoutException("invokeSync call timeout");
             }
-            default:
-                break;
+
+            GetAllSubscriptionGroupRequestHeader requestHeader = new GetAllSubscriptionGroupRequestHeader();
+            requestHeader.setGroupSeq(groupSeq);
+            requestHeader.setMaxGroupNum(getMaxPageSize());
+            requestHeader.setDataVersion(Optional.ofNullable(currentDataVersion)
+                .map(DataVersion::toJson).orElse(StringUtils.EMPTY));
+            LOGGER.info("getAllSubscriptionGroup from seq {}, max {}, dataVersion {}",
+                    groupSeq, requestHeader.getMaxGroupNum(), requestHeader.getDataVersion());
+            RemotingCommand request = RemotingCommand.createRequestCommand(RequestCode.GET_ALL_SUBSCRIPTIONGROUP_CONFIG, requestHeader);
+            RemotingCommand response = this.remotingClient.invokeSync(addr, request, 30000);
+
+            assert response != null;
+            if (response.getCode() == SUCCESS) {
+                SubscriptionGroupWrapper subscriptionGroupWrapper =
+                    SubscriptionGroupWrapper.decode(response.getBody(), SubscriptionGroupWrapper.class);
+                subscriptionGroupTable.putAll(subscriptionGroupWrapper.getSubscriptionGroupTable());
+                forbiddenTable.putAll(subscriptionGroupWrapper.getForbiddenTable());
+
+                DataVersion newDataVersion = subscriptionGroupWrapper.getDataVersion();
+                if (currentDataVersion == null) {
+                    // fill dataVersion before break the loop to compatible with old version server
+                    currentDataVersion = newDataVersion;
+                }
+
+                groupSeq += subscriptionGroupWrapper.getSubscriptionGroupTable().size();
+
+                GetAllSubscriptionGroupResponseHeader responseHeader =
+                    response.decodeCommandCustomHeader(GetAllSubscriptionGroupResponseHeader.class);
+                Integer totalGroupNum = Optional.ofNullable(responseHeader)
+                    .map(GetAllSubscriptionGroupResponseHeader::getTotalGroupNum).orElse(null);
+
+                if (Objects.isNull(totalGroupNum)) {
+                    // the server side don't support totalGroupNum, all data is returned
+                    break;
+                }
+
+                if (!Objects.equals(currentDataVersion, newDataVersion)) {
+                    LOGGER.error("dataVersion changed, currentDataVersion: {}, newDataVersion: {}",
+                        currentDataVersion, newDataVersion);
+                    currentDataVersion = newDataVersion;
+                    groupSeq = 0;
+                    subscriptionGroupTable.clear();
+                    forbiddenTable.clear();
+                    continue;
+                }
+
+                if (groupSeq >= totalGroupNum - 1) {
+                    LOGGER.info("get all subscription group config, totalGroupNum: {}", totalGroupNum);
+                    break;
+                }
+            } else {
+                throw new MQBrokerException(response.getCode(), response.getRemark(), addr);
+            }
         }
 
-        throw new MQBrokerException(response.getCode(), response.getRemark(), addr);
+        SubscriptionGroupWrapper allSubscriptionGroup = new SubscriptionGroupWrapper();
+        allSubscriptionGroup.setSubscriptionGroupTable(subscriptionGroupTable);
+        allSubscriptionGroup.setForbiddenTable(forbiddenTable);
+        allSubscriptionGroup.setDataVersion(currentDataVersion);
+        return allSubscriptionGroup;
     }
 
     public void registerRPCHook(RPCHook rpcHook) {
@@ -1365,9 +1496,9 @@ public class BrokerOuterAPI {
         requestHeader.setHeartbeatTimeoutMills(controllerHeartBeatTimeoutMills);
         requestHeader.setElectionPriority(electionPriority);
         requestHeader.setBrokerId(brokerId);
-        brokerOuterExecutor.execute(new AbstractBrokerRunnable(new BrokerIdentity(clusterName, brokerName, brokerId, isInBrokerContainer)) {
+        brokerOuterExecutor.execute(new Runnable() {
             @Override
-            public void run0() {
+            public void run() {
                 RemotingCommand request = RemotingCommand.createRequestCommand(RequestCode.BROKER_HEARTBEAT, requestHeader);
 
                 try {
@@ -1489,6 +1620,14 @@ public class BrokerOuterAPI {
         pullResult.setMessageBinary(null);
 
         return pullResult;
+    }
+
+    private int getMaxPageSize() {
+        return 2000;
+    }
+
+    private long getTimeoutMillis() {
+        return TimeUnit.SECONDS.toMillis(60);
     }
 
 }

@@ -81,7 +81,9 @@ public class ProxyConfig implements ConfigFile {
      */
     private boolean tlsTestModeEnable = true;
     private String tlsKeyPath = ConfigurationManager.getProxyHome() + "/conf/tls/rocketmq.key";
+    private String tlsKeyPassword = "";
     private String tlsCertPath = ConfigurationManager.getProxyHome() + "/conf/tls/rocketmq.crt";
+    private int tlsCertWatchIntervalMs = 60 * 60 * 1000; // 1 hour
     /**
      * gRPC
      */
@@ -117,6 +119,13 @@ public class ProxyConfig implements ConfigFile {
      * max message group size, 0 or negative number means no limit for proxy
      */
     private int maxMessageGroupSize = 64;
+    /**
+     * max lite topic size
+     */
+    private int maxLiteTopicSize = 64;
+    private int maxLiteRenewNumPerChannel = 100;
+    // syncLiteSubscription request rate limit per proxy
+    private int maxSyncLiteSubscriptionRate = 5000;
 
     /**
      * When a message pops, the message is invisible by default
@@ -202,8 +211,7 @@ public class ProxyConfig implements ConfigFile {
     private long renewAheadTimeMillis = TimeUnit.SECONDS.toMillis(10);
     private long renewMaxTimeMillis = TimeUnit.HOURS.toMillis(3);
     private long renewSchedulePeriodMillis = TimeUnit.SECONDS.toMillis(5);
-
-    private boolean enableACL = false;
+    private int returnHandleGroupThreadPoolNums = 2;
 
     private boolean enableAclRpcHookForClusterMode = false;
 
@@ -324,6 +332,14 @@ public class ProxyConfig implements ConfigFile {
         } catch (Exception e) {
             log.error("parse delay level failed. messageDelayLevel:{}", messageDelayLevel, e);
         }
+    }
+
+    public int getTlsCertWatchIntervalMs() {
+        return tlsCertWatchIntervalMs;
+    }
+
+    public void setTlsCertWatchIntervalMs(int tlsCertWatchIntervalMs) {
+        this.tlsCertWatchIntervalMs = tlsCertWatchIntervalMs;
     }
 
     public String getRocketMQClusterName() {
@@ -484,6 +500,14 @@ public class ProxyConfig implements ConfigFile {
 
     public void setTlsKeyPath(String tlsKeyPath) {
         this.tlsKeyPath = tlsKeyPath;
+    }
+
+    public String getTlsKeyPassword() {
+        return tlsKeyPassword;
+    }
+
+    public void setTlsKeyPassword(String tlsKeyPassword) {
+        this.tlsKeyPassword = tlsKeyPassword;
     }
 
     public String getTlsCertPath() {
@@ -1046,14 +1070,6 @@ public class ProxyConfig implements ConfigFile {
         this.longPollingReserveTimeInMillis = longPollingReserveTimeInMillis;
     }
 
-    public boolean isEnableACL() {
-        return enableACL;
-    }
-
-    public void setEnableACL(boolean enableACL) {
-        this.enableACL = enableACL;
-    }
-
     public boolean isEnableAclRpcHookForClusterMode() {
         return enableAclRpcHookForClusterMode;
     }
@@ -1224,10 +1240,6 @@ public class ProxyConfig implements ConfigFile {
 
     public void setMetricsExporterType(MetricsExporterType metricsExporterType) {
         this.metricsExporterType = metricsExporterType;
-    }
-
-    public void setMetricsExporterType(int metricsExporterType) {
-        this.metricsExporterType = MetricsExporterType.valueOf(metricsExporterType);
     }
 
     public void setMetricsExporterType(String metricsExporterType) {
@@ -1536,5 +1548,37 @@ public class ProxyConfig implements ConfigFile {
 
     public void setEnableMessageBodyEmptyCheck(boolean enableMessageBodyEmptyCheck) {
         this.enableMessageBodyEmptyCheck = enableMessageBodyEmptyCheck;
+    }
+
+    public int getMaxLiteTopicSize() {
+        return maxLiteTopicSize;
+    }
+
+    public void setMaxLiteTopicSize(int maxLiteTopicSize) {
+        this.maxLiteTopicSize = maxLiteTopicSize;
+    }
+
+    public int getMaxLiteRenewNumPerChannel() {
+        return maxLiteRenewNumPerChannel;
+    }
+
+    public void setMaxLiteRenewNumPerChannel(int maxLiteRenewNumPerChannel) {
+        this.maxLiteRenewNumPerChannel = maxLiteRenewNumPerChannel;
+    }
+
+    public int getMaxSyncLiteSubscriptionRate() {
+        return maxSyncLiteSubscriptionRate;
+    }
+
+    public void setMaxSyncLiteSubscriptionRate(int maxSyncLiteSubscriptionRate) {
+        this.maxSyncLiteSubscriptionRate = maxSyncLiteSubscriptionRate;
+    }
+
+    public int getReturnHandleGroupThreadPoolNums() {
+        return returnHandleGroupThreadPoolNums;
+    }
+
+    public void setReturnHandleGroupThreadPoolNums(int returnHandleGroupThreadPoolNums) {
+        this.returnHandleGroupThreadPoolNums = returnHandleGroupThreadPoolNums;
     }
 }

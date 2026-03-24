@@ -31,9 +31,13 @@ import java.net.NetworkInterface;
 import java.net.SocketException;
 import java.net.URL;
 import java.net.URLConnection;
+import java.nio.channels.FileChannel;
 import java.nio.charset.StandardCharsets;
+import java.nio.file.Files;
+import java.nio.file.NotDirectoryException;
 import java.nio.file.Path;
 import java.nio.file.Paths;
+import java.nio.file.StandardOpenOption;
 import java.util.ArrayList;
 import java.util.Enumeration;
 import java.util.List;
@@ -41,6 +45,7 @@ import java.util.Map;
 import java.util.Properties;
 import java.util.Set;
 import java.util.TreeMap;
+import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.function.Predicate;
 
@@ -57,6 +62,10 @@ import org.apache.rocketmq.logging.org.slf4j.LoggerFactory;
 public class MixAll {
     public static final String ROCKETMQ_HOME_ENV = "ROCKETMQ_HOME";
     public static final String ROCKETMQ_HOME_PROPERTY = "rocketmq.home.dir";
+    /**
+     * unify the home dir
+     */
+    public static final String ROCKETMQ_HOME_DIR = System.getProperty(ROCKETMQ_HOME_PROPERTY, System.getenv(ROCKETMQ_HOME_ENV));
     public static final String NAMESRV_ADDR_ENV = "NAMESRV_ADDR";
     public static final String NAMESRV_ADDR_PROPERTY = "rocketmq.namesrv.addr";
     public static final String MESSAGE_COMPRESS_TYPE = "rocketmq.message.compressType";
@@ -120,6 +129,7 @@ public class MixAll {
     public static final String MULTI_PATH_SPLITTER = System.getProperty("rocketmq.broker.multiPathSplitter", ",");
 
     private static final String OS = System.getProperty("os.name").toLowerCase();
+    public static final long MILLS_FOR_HOUR = TimeUnit.HOURS.toMillis(1);
 
     private static final Set<String> PREDEFINE_GROUP_SET = ImmutableSet.of(
         DEFAULT_CONSUMER_GROUP,
@@ -233,6 +243,18 @@ public class MixAll {
             fileParent.mkdirs();
         }
         IOTinyUtils.writeStringToFile(file, str, DEFAULT_CHARSET);
+    }
+
+    public static synchronized void fsyncDirectory(Path dir) throws IOException {
+        if (!Files.isDirectory(dir)) {
+            throw new NotDirectoryException(dir.toString());
+        }
+        if (isWindows()) {
+            return;
+        }
+        try (FileChannel fc = FileChannel.open(dir, StandardOpenOption.READ)) {
+            fc.force(true);
+        }
     }
 
     public static String file2String(final String fileName) throws IOException {
@@ -554,7 +576,72 @@ public class MixAll {
 
     public static boolean topicAllowsLMQ(String topic) {
         return !topic.startsWith(MixAll.RETRY_GROUP_TOPIC_PREFIX)
+            && !topic.startsWith(MixAll.DLQ_GROUP_TOPIC_PREFIX)
             && !topic.startsWith(TopicValidator.SYSTEM_TOPIC_PREFIX)
             && !topic.equals(TopicValidator.RMQ_SYS_SCHEDULE_TOPIC);
+    }
+
+    public static String adjustConfigForPlatform(String config) {
+        if (StringUtils.isNotBlank(config)) {
+            if (isWindows()) {
+                config = StringUtils.replace(config, "\\", "\\\\");
+            }
+        }
+        return config;
+    }
+
+    public static long dealTimeToHourStamps(long timeStamp) {
+        if (timeStamp <= 0L) {
+            return timeStamp;
+        }
+        return (timeStamp / MILLS_FOR_HOUR) * MILLS_FOR_HOUR;
+    }
+
+    public static boolean isHourTime(Long timeStamp) {
+        if (null == timeStamp) {
+            return false;
+        }
+        if (timeStamp <= 0L) {
+            return false;
+        }
+        return timeStamp % MILLS_FOR_HOUR == 0;
+    }
+
+    public static List<Long> getHours(long startTimeMillis, long endTimeMillis) {
+        if (startTimeMillis > endTimeMillis || startTimeMillis <= 0L || endTimeMillis <= 0L) {
+            return null;
+        }
+        List<Long> result = new ArrayList<>();
+        long startHour = dealTimeToHourStamps(startTimeMillis);
+        long endHour = dealTimeToHourStamps(endTimeMillis);
+        long current = startHour;
+        while (current <= endHour) {
+            result.add(current);
+            //protect system self 30 * 24
+            if (result.size() >= 720) {
+                return result;
+            }
+            current += MILLS_FOR_HOUR;
+        }
+        return result;
+    }
+
+    public static boolean isByteArrayEqual(byte[] array1, int offset1, int length1, byte[] array2, int offset2, int length2) {
+        if (null == array1 || null == array2) {
+            return false;
+        }
+        if (length1 != length2) {
+            return false;
+        }
+        if (offset1 < 0 || offset1 + length1 > array1.length ||
+            offset2 < 0 || offset2 + length2 > array2.length) {
+            throw new ArrayIndexOutOfBoundsException("Invalid array index");
+        }
+        for (int i = 0; i < length1; i++) {
+            if (array1[offset1 + i] != array2[offset2 + i]) {
+                return false;
+            }
+        }
+        return true;
     }
 }
