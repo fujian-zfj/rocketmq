@@ -17,30 +17,24 @@
 
 package org.apache.rocketmq.proxy.remoting.activity;
 
-import io.netty.channel.Channel;
 import io.netty.channel.ChannelHandlerContext;
 import java.util.HashMap;
 import java.util.Map;
-import java.util.Optional;
 import org.apache.rocketmq.acl.common.AclException;
 import org.apache.rocketmq.client.exception.MQBrokerException;
 import org.apache.rocketmq.client.exception.MQClientException;
-import org.apache.rocketmq.common.MQVersion;
 import org.apache.rocketmq.common.constant.LoggerName;
 import org.apache.rocketmq.common.message.MessageConst;
-import org.apache.rocketmq.common.utils.NetworkUtil;
+import org.apache.rocketmq.common.utils.ExceptionUtils;
 import org.apache.rocketmq.logging.org.slf4j.Logger;
 import org.apache.rocketmq.logging.org.slf4j.LoggerFactory;
 import org.apache.rocketmq.proxy.common.ProxyContext;
 import org.apache.rocketmq.proxy.common.ProxyException;
 import org.apache.rocketmq.proxy.common.ProxyExceptionCode;
-import org.apache.rocketmq.proxy.common.utils.ExceptionUtils;
 import org.apache.rocketmq.proxy.config.ConfigurationManager;
 import org.apache.rocketmq.proxy.config.ProxyConfig;
 import org.apache.rocketmq.proxy.processor.MessagingProcessor;
-import org.apache.rocketmq.proxy.processor.channel.ChannelProtocolType;
 import org.apache.rocketmq.proxy.remoting.pipeline.RequestPipeline;
-import org.apache.rocketmq.remoting.common.RemotingHelper;
 import org.apache.rocketmq.remoting.netty.NettyRequestProcessor;
 import org.apache.rocketmq.remoting.protocol.RemotingCommand;
 import org.apache.rocketmq.remoting.protocol.RequestCode;
@@ -69,7 +63,7 @@ public abstract class AbstractRemotingActivity implements NettyRequestProcessor 
     protected RemotingCommand request(ChannelHandlerContext ctx, RemotingCommand request,
         ProxyContext context, long timeoutMillis) throws Exception {
         String brokerName;
-        if (request.getCode() == RequestCode.SEND_MESSAGE_V2) {
+        if (request.getCode() == RequestCode.SEND_MESSAGE_V2 || request.getCode() == RequestCode.SEND_BATCH_MESSAGE) {
             if (request.getExtFields().get(BROKER_NAME_FIELD_FOR_SEND_MESSAGE_V2) == null) {
                 return RemotingCommand.buildErrorResponse(ResponseCode.VERSION_NOT_SUPPORTED,
                     "Request doesn't have field bname");
@@ -97,7 +91,7 @@ public abstract class AbstractRemotingActivity implements NettyRequestProcessor 
 
     @Override
     public RemotingCommand processRequest(ChannelHandlerContext ctx, RemotingCommand request) throws Exception {
-        ProxyContext context = createContext(ctx, request);
+        ProxyContext context = createContext();
         try {
             this.requestPipeline.execute(ctx, request, context);
             RemotingCommand response = this.processRequest0(ctx, request, context);
@@ -119,23 +113,8 @@ public abstract class AbstractRemotingActivity implements NettyRequestProcessor 
     protected abstract RemotingCommand processRequest0(ChannelHandlerContext ctx, RemotingCommand request,
         ProxyContext context) throws Exception;
 
-    protected ProxyContext createContext(ChannelHandlerContext ctx, RemotingCommand request) {
-        ProxyContext context = ProxyContext.create();
-        Channel channel = ctx.channel();
-        context.setAction(RemotingHelper.getRequestCodeDesc(request.getCode()))
-            .setProtocolType(ChannelProtocolType.REMOTING.getName())
-            .setChannel(channel)
-            .setLocalAddress(NetworkUtil.socketAddress2String(ctx.channel().localAddress()))
-            .setRemoteAddress(NetworkUtil.socketAddress2String(ctx.channel().remoteAddress()));
-
-        Optional.ofNullable(RemotingHelper.getAttributeValue(RemotingHelper.LANGUAGE_CODE_KEY, channel))
-            .ifPresent(language -> context.setLanguage(language.name()));
-        Optional.ofNullable(RemotingHelper.getAttributeValue(RemotingHelper.CLIENT_ID_KEY, channel))
-            .ifPresent(context::setClientID);
-        Optional.ofNullable(RemotingHelper.getAttributeValue(RemotingHelper.VERSION_KEY, channel))
-            .ifPresent(version -> context.setClientVersion(MQVersion.getVersionDesc(version)));
-
-        return context;
+    protected ProxyContext createContext() {
+        return ProxyContext.create();
     }
 
     protected void writeErrResponse(ChannelHandlerContext ctx, final ProxyContext context,

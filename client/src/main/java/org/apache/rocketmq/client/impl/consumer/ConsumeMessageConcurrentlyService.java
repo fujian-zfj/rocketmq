@@ -169,11 +169,11 @@ public class ConsumeMessageConcurrentlyService implements ConsumeMessageService 
             result.setConsumeResult(CMResult.CR_THROW_EXCEPTION);
             result.setRemark(UtilAll.exceptionSimpleDesc(e));
 
-            log.warn(String.format("consumeMessageDirectly exception: %s Group: %s Msgs: %s MQ: %s",
+            log.warn("consumeMessageDirectly exception: {} Group: {} Msgs: {} MQ: {}",
                 UtilAll.exceptionSimpleDesc(e),
                 ConsumeMessageConcurrentlyService.this.consumerGroup,
                 msgs,
-                mq), e);
+                mq, e);
         }
 
         result.setSpentTimeMills(System.currentTimeMillis() - beginTime);
@@ -410,11 +410,11 @@ public class ConsumeMessageConcurrentlyService implements ConsumeMessageService 
                 }
                 status = listener.consumeMessage(Collections.unmodifiableList(msgs), context);
             } catch (Throwable e) {
-                log.warn(String.format("consumeMessage exception: %s Group: %s Msgs: %s MQ: %s",
+                log.warn("consumeMessage exception: {} Group: {} Msgs: {} MQ: {}",
                     UtilAll.exceptionSimpleDesc(e),
                     ConsumeMessageConcurrentlyService.this.consumerGroup,
                     msgs,
-                    messageQueue), e);
+                    messageQueue, e);
                 hasException = true;
             }
             long consumeRT = System.currentTimeMillis() - beginTimestamp;
@@ -447,6 +447,7 @@ public class ConsumeMessageConcurrentlyService implements ConsumeMessageService 
             if (ConsumeMessageConcurrentlyService.this.defaultMQPushConsumerImpl.hasHook()) {
                 consumeMessageContext.setStatus(status.toString());
                 consumeMessageContext.setSuccess(ConsumeConcurrentlyStatus.CONSUME_SUCCESS == status);
+                consumeMessageContext.setAccessChannel(defaultMQPushConsumer.getAccessChannel());
                 ConsumeMessageConcurrentlyService.this.defaultMQPushConsumerImpl.executeHookAfter(consumeMessageContext);
             }
 

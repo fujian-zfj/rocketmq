@@ -37,7 +37,10 @@ import java.util.concurrent.atomic.AtomicLong;
 import java.util.concurrent.locks.Lock;
 import java.util.concurrent.locks.ReentrantLock;
 import org.apache.rocketmq.common.ConfigManager;
+import org.apache.rocketmq.common.MixAll;
 import org.apache.rocketmq.common.constant.LoggerName;
+import org.apache.rocketmq.common.message.MessageConst;
+import org.apache.rocketmq.common.message.MessageExt;
 import org.apache.rocketmq.common.topic.TopicValidator;
 import org.apache.rocketmq.logging.org.slf4j.Logger;
 import org.apache.rocketmq.logging.org.slf4j.LoggerFactory;
@@ -78,7 +81,8 @@ public class TimerMetrics extends ConfigManager {
         return distPair.getCount().addAndGet(value);
     }
 
-    public long addAndGet(String topic, int value) {
+    public long addAndGet(MessageExt msg, int value) {
+        String topic = msg.getProperty(MessageConst.PROPERTY_REAL_TOPIC);
         Metric pair = getTopicPair(topic);
         getDataVersion().nextVersion();
         pair.setTimeStamp(System.currentTimeMillis());
@@ -181,7 +185,8 @@ public class TimerMetrics extends ConfigManager {
         while (iterator.hasNext()) {
             Map.Entry<String, Metric> entry = iterator.next();
             final String topic = entry.getKey();
-            if (topic.startsWith(TopicValidator.SYSTEM_TOPIC_PREFIX)) {
+            if (topic.startsWith(TopicValidator.SYSTEM_TOPIC_PREFIX)
+                    || topic.startsWith(MixAll.LMQ_PREFIX)) {
                 continue;
             }
             if (topics.contains(topic)) {
@@ -191,6 +196,16 @@ public class TimerMetrics extends ConfigManager {
             iterator.remove();
             log.info("clean timer metrics, because not in topic config, {}", topic);
         }
+    }
+
+    public boolean removeTimingCount(String topic) {
+        try {
+            timingCount.remove(topic);
+        } catch (Exception e) {
+            log.error("removeTimingCount error", e);
+            return false;
+        }
+        return true;
     }
 
     public static class TimerMetricsSerializeWrapper extends RemotingSerializable {

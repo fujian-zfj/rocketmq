@@ -22,11 +22,14 @@ import java.lang.reflect.Field;
 import java.util.Map;
 
 import java.util.concurrent.atomic.AtomicReference;
+
+import org.apache.rocketmq.common.BrokerConfig;
 import org.apache.rocketmq.remoting.protocol.LanguageCode;
 import org.junit.Before;
 import org.junit.Test;
 import org.junit.runner.RunWith;
 import org.mockito.Mock;
+import org.mockito.Mockito;
 import org.mockito.junit.MockitoJUnitRunner;
 
 import static org.assertj.core.api.Assertions.assertThat;
@@ -35,6 +38,8 @@ import static org.mockito.Mockito.when;
 
 @RunWith(MockitoJUnitRunner.class)
 public class ProducerManagerTest {
+
+    private BrokerConfig brokerConfig;
     private ProducerManager producerManager;
     private String group = "FooBar";
     private ClientChannelInfo clientInfo;
@@ -44,7 +49,8 @@ public class ProducerManagerTest {
 
     @Before
     public void init() {
-        producerManager = new ProducerManager();
+        brokerConfig = new BrokerConfig();
+        producerManager = new ProducerManager(null, brokerConfig);
         clientInfo = new ClientChannelInfo(channel, "clientId", LanguageCode.JAVA, 0);
     }
 
@@ -80,6 +86,39 @@ public class ProducerManagerTest {
     }
 
     @Test
+    public void scanNotActiveChannelWithSameClientId() throws Exception {
+        producerManager.registerProducer(group, clientInfo);
+        Channel channel1 = Mockito.mock(Channel.class);
+        ClientChannelInfo clientInfo1 = new ClientChannelInfo(channel1, clientInfo.getClientId(), LanguageCode.JAVA, 0);
+        producerManager.registerProducer(group, clientInfo1);
+        AtomicReference<String> groupRef = new AtomicReference<>();
+        AtomicReference<ClientChannelInfo> clientChannelInfoRef = new AtomicReference<>();
+        producerManager.appendProducerChangeListener((event, group, clientChannelInfo) -> {
+            switch (event) {
+                case GROUP_UNREGISTER:
+                    groupRef.set(group);
+                    break;
+                case CLIENT_UNREGISTER:
+                    clientChannelInfoRef.set(clientChannelInfo);
+                    break;
+                default:
+                    break;
+            }
+        });
+        assertThat(producerManager.getGroupChannelTable().get(group).get(channel)).isNotNull();
+        assertThat(producerManager.getGroupChannelTable().get(group).get(channel1)).isNotNull();
+        assertThat(producerManager.findChannel("clientId")).isNotNull();
+        Field field = ProducerManager.class.getDeclaredField("CHANNEL_EXPIRED_TIMEOUT");
+        field.setAccessible(true);
+        long channelExpiredTimeout = field.getLong(producerManager);
+        clientInfo.setLastUpdateTimestamp(System.currentTimeMillis() - channelExpiredTimeout - 10);
+        when(channel.close()).thenReturn(mock(ChannelFuture.class));
+        producerManager.scanNotActiveChannel();
+        assertThat(producerManager.getGroupChannelTable().get(group).get(channel1)).isNotNull();
+        assertThat(producerManager.findChannel("clientId")).isNotNull();
+    }
+
+    @Test
     public void doChannelCloseEvent() throws Exception {
         producerManager.registerProducer(group, clientInfo);
         AtomicReference<String> groupRef = new AtomicReference<>();
@@ -106,10 +145,20 @@ public class ProducerManagerTest {
     }
 
     @Test
-    public void testRegisterProducer() throws Exception {
+    public void testRegisterProducer() {
+        brokerConfig.setEnableRegisterProducer(false);
+        brokerConfig.setRejectTransactionMessage(true);
         producerManager.registerProducer(group, clientInfo);
         Map<Channel, ClientChannelInfo> channelMap = producerManager.getGroupChannelTable().get(group);
         Channel channel1 = producerManager.findChannel("clientId");
+        assertThat(channelMap).isNull();
+        assertThat(channel1).isNull();
+
+        brokerConfig.setEnableRegisterProducer(true);
+        brokerConfig.setRejectTransactionMessage(false);
+        producerManager.registerProducer(group, clientInfo);
+        channelMap = producerManager.getGroupChannelTable().get(group);
+        channel1 = producerManager.findChannel("clientId");
         assertThat(channelMap).isNotNull();
         assertThat(channel1).isNotNull();
         assertThat(channelMap.get(channel)).isEqualTo(clientInfo);

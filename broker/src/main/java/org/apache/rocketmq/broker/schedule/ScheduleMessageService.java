@@ -23,10 +23,10 @@ import java.util.Queue;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ConcurrentMap;
+import java.util.concurrent.ConcurrentSkipListMap;
 import java.util.concurrent.ExecutionException;
 import java.util.concurrent.LinkedBlockingQueue;
 import java.util.concurrent.ScheduledExecutorService;
-import java.util.concurrent.ScheduledThreadPoolExecutor;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
@@ -53,6 +53,7 @@ import org.apache.rocketmq.remoting.protocol.DataVersion;
 import org.apache.rocketmq.store.PutMessageResult;
 import org.apache.rocketmq.store.PutMessageStatus;
 import org.apache.rocketmq.store.config.StorePathConfigHelper;
+import org.apache.rocketmq.store.exception.ConsumeQueueException;
 import org.apache.rocketmq.store.queue.ConsumeQueueInterface;
 import org.apache.rocketmq.store.queue.CqUnit;
 import org.apache.rocketmq.store.queue.ReferredIterator;
@@ -71,8 +72,8 @@ public class ScheduleMessageService extends ConfigManager {
     private static final long WAIT_FOR_SHUTDOWN = 5000L;
     private static final long DELAY_FOR_A_SLEEP = 10L;
 
-    private final ConcurrentMap<Integer /* level */, Long/* delay timeMillis */> delayLevelTable =
-        new ConcurrentHashMap<>(32);
+    private final ConcurrentSkipListMap<Integer /* level */, Long/* delay timeMillis */> delayLevelTable =
+        new ConcurrentSkipListMap<>();
 
     private final ConcurrentMap<Integer /* level */, Long/* offset */> offsetTable =
         new ConcurrentHashMap<>(32);
@@ -91,8 +92,8 @@ public class ScheduleMessageService extends ConfigManager {
     public ScheduleMessageService(final BrokerController brokerController) {
         this.brokerController = brokerController;
         this.enableAsyncDeliver = brokerController.getMessageStoreConfig().isEnableScheduleAsyncDeliver();
-        scheduledPersistService = new ScheduledThreadPoolExecutor(1,
-                new ThreadFactoryImpl("ScheduleMessageServicePersistThread", true, brokerController.getBrokerConfig()));
+        scheduledPersistService = ThreadUtils.newScheduledThreadPool(1,
+            new ThreadFactoryImpl("ScheduleMessageServicePersistThread", true, brokerController.getBrokerConfig()));
     }
 
     public static int queueId2DelayLevel(final int queueId) {
@@ -103,7 +104,7 @@ public class ScheduleMessageService extends ConfigManager {
         return delayLevel - 1;
     }
 
-    public void buildRunningStats(HashMap<String, String> stats) {
+    public void buildRunningStats(HashMap<String, String> stats) throws ConsumeQueueException {
         for (Map.Entry<Integer, Long> next : this.offsetTable.entrySet()) {
             int queueId = delayLevel2QueueId(next.getKey());
             long delayOffset = next.getValue();
@@ -134,9 +135,9 @@ public class ScheduleMessageService extends ConfigManager {
     public void start() {
         if (started.compareAndSet(false, true)) {
             this.load();
-            this.deliverExecutorService = new ScheduledThreadPoolExecutor(this.maxDelayLevel, new ThreadFactoryImpl("ScheduleMessageTimerThread_"));
+            this.deliverExecutorService = ThreadUtils.newScheduledThreadPool(this.maxDelayLevel, new ThreadFactoryImpl("ScheduleMessageTimerThread_"));
             if (this.enableAsyncDeliver) {
-                this.handleExecutorService = new ScheduledThreadPoolExecutor(this.maxDelayLevel, new ThreadFactoryImpl("ScheduleMessageExecutorHandleThread_"));
+                this.handleExecutorService = ThreadUtils.newScheduledThreadPool(this.maxDelayLevel, new ThreadFactoryImpl("ScheduleMessageExecutorHandleThread_"));
             }
             for (Map.Entry<Integer, Long> entry : this.delayLevelTable.entrySet()) {
                 Integer level = entry.getKey();
@@ -169,7 +170,7 @@ public class ScheduleMessageService extends ConfigManager {
         ThreadUtils.shutdown(scheduledPersistService);
     }
 
-    public void stop() {
+    public boolean stop() {
         if (this.started.compareAndSet(true, false) && null != this.deliverExecutorService) {
             this.deliverExecutorService.shutdown();
             try {
@@ -193,6 +194,7 @@ public class ScheduleMessageService extends ConfigManager {
 
             this.persist();
         }
+        return true;
     }
 
     public boolean isStarted() {
@@ -221,6 +223,12 @@ public class ScheduleMessageService extends ConfigManager {
         boolean result = super.load();
         result = result && this.parseDelayLevel();
         result = result && this.correctDelayOffset();
+        return result;
+    }
+
+    public boolean loadWhenSyncDelayOffset() {
+        boolean result = super.load();
+        result = result && this.parseDelayLevel();
         return result;
     }
 
@@ -370,7 +378,7 @@ public class ScheduleMessageService extends ConfigManager {
                 if (isStarted()) {
                     this.executeOnTimeUp();
                 }
-            } catch (Exception e) {
+            } catch (Throwable e) {
                 // XXX: warn and notify me
                 log.error("ScheduleMessageService, executeOnTimeUp exception", e);
                 this.scheduleNextTimerTask(this.offset, DELAY_FOR_A_PERIOD);
@@ -466,7 +474,7 @@ public class ScheduleMessageService extends ConfigManager {
                     }
 
                     if (!deliverSuc) {
-                        this.scheduleNextTimerTask(nextOffset, DELAY_FOR_A_WHILE);
+                        this.scheduleNextTimerTask(currOffset, DELAY_FOR_A_WHILE);
                         return;
                     }
                 }
@@ -559,7 +567,8 @@ public class ScheduleMessageService extends ConfigManager {
                             pendingQueue.remove();
                             break;
                         case RUNNING:
-                            break;
+                            scheduleNextTask();
+                            return;
                         case EXCEPTION:
                             if (!isStarted()) {
                                 log.warn("HandlePutResultTask shutdown, info={}", putResultProcess.toString());
@@ -579,6 +588,10 @@ public class ScheduleMessageService extends ConfigManager {
                 }
             }
 
+            scheduleNextTask();
+        }
+
+        private void scheduleNextTask() {
             if (isStarted()) {
                 ScheduleMessageService.this.handleExecutorService
                     .schedule(new HandlePutResultTask(this.delayLevel), DELAY_FOR_A_SLEEP, TimeUnit.MILLISECONDS);

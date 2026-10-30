@@ -24,10 +24,12 @@ import io.netty.channel.ChannelFuture;
 import io.netty.channel.ChannelHandlerContext;
 import io.netty.channel.ChannelInitializer;
 import io.netty.channel.ChannelOption;
+import io.netty.handler.codec.haproxy.HAProxyMessageEncoder;
 import io.netty.handler.ssl.ApplicationProtocolConfig;
 import io.netty.handler.ssl.ApplicationProtocolNames;
 import io.netty.handler.ssl.SslContext;
 import io.netty.handler.ssl.SslContextBuilder;
+import io.netty.handler.ssl.SslHandler;
 import io.netty.handler.ssl.SslProvider;
 import io.netty.handler.ssl.util.InsecureTrustManagerFactory;
 import javax.net.ssl.SSLException;
@@ -101,11 +103,8 @@ public class Http2ProtocolProxyHandler implements ProtocolHandler {
             .handler(new ChannelInitializer<Channel>() {
                 @Override
                 protected void initChannel(Channel ch) throws Exception {
-                    if (sslContext != null) {
-                        ch.pipeline()
-                            .addLast(sslContext.newHandler(ch.alloc(), LOCAL_HOST, config.getGrpcServerPort()));
-                    }
-                    ch.pipeline().addLast(new Http2ProxyBackendHandler(inboundChannel));
+                    ch.pipeline().addLast(null, Http2ProxyBackendHandler.HANDLER_NAME,
+                            new Http2ProxyBackendHandler(inboundChannel));
                 }
             })
             .option(ChannelOption.AUTO_READ, false)
@@ -120,7 +119,17 @@ public class Http2ProtocolProxyHandler implements ProtocolHandler {
         }
 
         final Channel outboundChannel = f.channel();
+        configPipeline(inboundChannel, outboundChannel);
 
-        ctx.pipeline().addLast(new Http2ProxyFrontendHandler(outboundChannel));
+        SslHandler sslHandler = null;
+        if (sslContext != null) {
+            sslHandler = sslContext.newHandler(outboundChannel.alloc(), LOCAL_HOST, config.getGrpcServerPort());
+        }
+        ctx.pipeline().addLast(new Http2ProxyFrontendHandler(outboundChannel, sslHandler));
+    }
+
+    protected void configPipeline(Channel inboundChannel, Channel outboundChannel) {
+        inboundChannel.pipeline().addLast(new HAProxyMessageForwarder(outboundChannel));
+        outboundChannel.pipeline().addFirst(HAProxyMessageEncoder.INSTANCE);
     }
 }

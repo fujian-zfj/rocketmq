@@ -13,7 +13,7 @@
     <parent>
         <groupId>org.apache.rocketmq</groupId>
         <artifactId>rocketmq-all</artifactId>
-        <version>5.1.3</version>
+        <version>5.3.3</version>
     </parent>
 
     <modelVersion>4.0.0</modelVersion>
@@ -59,8 +59,8 @@
             <artifactId>rocketmq-filter</artifactId>
         </dependency>
         <dependency>
-            <groupId>${project.groupId}</groupId>
-            <artifactId>rocketmq-acl</artifactId>
+            <groupId>org.apache.rocketmq</groupId>
+            <artifactId>rocketmq-auth</artifactId>
         </dependency>
         <dependency>
             <groupId>commons-io</groupId>

@@ -142,7 +142,7 @@ public abstract class AbstractSystemMessageSyncer implements StartAndShutdown, M
     public void start() throws Exception {
         this.createSysTopic();
         RPCHook rpcHook = this.getRpcHook();
-        this.defaultMQPushConsumer = new DefaultMQPushConsumer(null, this.getSystemMessageConsumerId(), rpcHook);
+        this.defaultMQPushConsumer = new DefaultMQPushConsumer(this.getSystemMessageConsumerId(), rpcHook);
 
         this.defaultMQPushConsumer.setConsumeFromWhere(ConsumeFromWhere.CONSUME_FROM_LAST_OFFSET);
         this.defaultMQPushConsumer.setMessageModel(MessageModel.BROADCASTING);
@@ -156,10 +156,6 @@ public abstract class AbstractSystemMessageSyncer implements StartAndShutdown, M
     }
 
     protected void createSysTopic() {
-        if (this.adminService.topicExist(this.getBroadcastTopicName())) {
-            return;
-        }
-
         String clusterName = this.getBroadcastTopicClusterName();
         if (StringUtils.isEmpty(clusterName)) {
             throw new ProxyException(ProxyExceptionCode.INTERNAL_SERVER_ERROR, "system topic cluster cannot be empty");
