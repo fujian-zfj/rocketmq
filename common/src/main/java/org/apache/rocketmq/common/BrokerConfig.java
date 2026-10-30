@@ -380,6 +380,18 @@ public class BrokerConfig extends BrokerIdentity {
     private boolean validateSystemTopicWhenUpdateTopic = true;
 
     /**
+     * Maximum rate (permits per second) for batch topic deletion.
+     * Setting to 0 or negative disables rate limiting.
+     */
+    private double batchDeleteTopicMaxRate = 10.0;
+
+    /**
+     * Maximum rate (permits per second) for batch subscription-group deletion.
+     * Setting to 0 or negative disables rate limiting.
+     */
+    private double batchDeleteSubscriptionGroupMaxRate = 10.0;
+
+    /**
      * It is an important basis for the controller to choose the broker master.
      * The lower the value of brokerElectionPriority, the higher the priority of the broker being selected as the master.
      * You can set a lower priority for the broker with better machine conditions.
@@ -403,6 +415,43 @@ public class BrokerConfig extends BrokerIdentity {
     // Label pairs in CSV. Each label follows pattern of Key:Value. eg: instance_id:xxx,uid:xxx
     private String metricsLabel = "";
 
+    /**
+     * Whether to wrap {@code OtlpGrpcMetricExporter} with
+     * {@code BatchSplittingMetricExporter}. When {@code true} (default)
+     * the splitter is active and guards against oversized OTLP payloads
+     * via sub-batching. Set to {@code false} to disable the wrapper
+     * entirely (escape hatch: use the raw exporter when the splitter
+     * itself is suspected of misbehaving, or when cardinality is known
+     * to stay well below the server payload limit).
+     */
+    private boolean metricsExportBatchSplitEnabled = true;
+
+    private int metricsExportBatchMaxDataPoints = 1000;
+
+    /**
+     * Max in-flight sub-batches per export() cycle when the batch splitter
+     * triggers. Bounds the MetricData retention window under OTel SDK
+     * 1.31+ where the OTLP exporter may hold metric references until the
+     * gRPC RPC completes. 0 or negative means unlimited (legacy behavior).
+     * Only effective when {@code metricsExportBatchSplitEnabled} is true.
+     */
+    private int metricsExportBatchMaxConcurrent = 4;
+
+    /**
+     * Memory mode for OtlpGrpcMetricExporter. Valid values (case-insensitive):
+     * "IMMUTABLE_DATA" (default, safe) or "REUSABLE_DATA".
+     * <p>
+     * OpenTelemetry Java 1.44.0 ~ 1.46.x ships REUSABLE_DATA as the default
+     * but its MetricReusableDataMarshaler uses a non-thread-safe ArrayDeque
+     * pool. Combined with concurrent sub-batch export it leaks marshalers
+     * until OOM (fixed upstream in 1.47.0, see opentelemetry-java#7041).
+     * IMMUTABLE_DATA bypasses that pool entirely. Switch back to
+     * REUSABLE_DATA only when running on OTel SDK >= 1.47.
+     * <p>
+     * Invalid values fall back to IMMUTABLE_DATA with a WARN log.
+     */
+    private String metricsExportOtelMemoryMode = "IMMUTABLE_DATA";
+
     private boolean metricsInDelta = false;
 
     private boolean enableRemotingMetrics = true;
@@ -413,6 +462,14 @@ public class BrokerConfig extends BrokerIdentity {
     private boolean enableStatsMetrics = true;
     private boolean enableRequestMetrics = true;
     private boolean enableLagAndDlqMetrics = true;
+
+    /**
+     * Whether to suppress exporting data points whose value is not greater than a minimal
+     * threshold (minValue). Set true to reduce metrics cardinality and export payload.
+     * Suppressed series disappear from the export instead of reporting minValue, so alert rules
+     * based on absent()/absent_over_time() will fire once value drops to minValue.
+     */
+    private boolean suppressMinValueMetrics = false;
 
     private long channelExpiredTimeout = 1000 * 120;
     private long subscriptionExpiredTimeout = 1000 * 60 * 10;
@@ -500,7 +557,6 @@ public class BrokerConfig extends BrokerIdentity {
 
     private boolean enableCreateSysGroup = true;
 
-    private boolean enableLiteEventMode = true;
 
     private long liteEventCheckInterval = 10 * 1000;
 
@@ -521,7 +577,11 @@ public class BrokerConfig extends BrokerIdentity {
 
     private int maxClientEventCount = 100;
 
+    private long liteEventCapacityCacheTtlMs = 5000;
+
     private long liteEventFullDispatchDelayTime = 10 * 1000;
+
+    private long liteEventFullDispatchDelayTimeForWildcardGroup = 10 * 1000;
 
     // lite metrics
     // whether to collect storeTime in popLiteProcessor
@@ -532,6 +592,10 @@ public class BrokerConfig extends BrokerIdentity {
     private boolean liteLagCountMetricsEnable = false;
 
     private int liteLagLatencyTopK = 50;
+
+    // HashedWheelTimer config for pop order lock manager
+    private long popOrderLockTimerTickMs = 100;
+    private int popOrderLockTimerTicksPerWheel = 512;
 
     public String getConfigBlackList() {
         return configBlackList;
@@ -1865,6 +1929,38 @@ public class BrokerConfig extends BrokerIdentity {
         this.metricsInDelta = metricsInDelta;
     }
 
+    public boolean isMetricsExportBatchSplitEnabled() {
+        return metricsExportBatchSplitEnabled;
+    }
+
+    public void setMetricsExportBatchSplitEnabled(boolean metricsExportBatchSplitEnabled) {
+        this.metricsExportBatchSplitEnabled = metricsExportBatchSplitEnabled;
+    }
+
+    public int getMetricsExportBatchMaxDataPoints() {
+        return metricsExportBatchMaxDataPoints;
+    }
+
+    public void setMetricsExportBatchMaxDataPoints(int metricsExportBatchMaxDataPoints) {
+        this.metricsExportBatchMaxDataPoints = metricsExportBatchMaxDataPoints;
+    }
+
+    public int getMetricsExportBatchMaxConcurrent() {
+        return metricsExportBatchMaxConcurrent;
+    }
+
+    public void setMetricsExportBatchMaxConcurrent(int metricsExportBatchMaxConcurrent) {
+        this.metricsExportBatchMaxConcurrent = metricsExportBatchMaxConcurrent;
+    }
+
+    public String getMetricsExportOtelMemoryMode() {
+        return metricsExportOtelMemoryMode;
+    }
+
+    public void setMetricsExportOtelMemoryMode(String metricsExportOtelMemoryMode) {
+        this.metricsExportOtelMemoryMode = metricsExportOtelMemoryMode;
+    }
+
     public int getMetricsPromExporterPort() {
         return metricsPromExporterPort;
     }
@@ -1930,6 +2026,14 @@ public class BrokerConfig extends BrokerIdentity {
         this.enableLagAndDlqMetrics = enableLagAndDlqMetrics;
     }
 
+    public boolean isSuppressMinValueMetrics() {
+        return suppressMinValueMetrics;
+    }
+
+    public void setSuppressMinValueMetrics(boolean suppressMinValueMetrics) {
+        this.suppressMinValueMetrics = suppressMinValueMetrics;
+    }
+
     public boolean isEnableRemotingMetrics() {
         return enableRemotingMetrics;
     }
@@ -1984,6 +2088,22 @@ public class BrokerConfig extends BrokerIdentity {
 
     public void setValidateSystemTopicWhenUpdateTopic(boolean validateSystemTopicWhenUpdateTopic) {
         this.validateSystemTopicWhenUpdateTopic = validateSystemTopicWhenUpdateTopic;
+    }
+
+    public double getBatchDeleteTopicMaxRate() {
+        return batchDeleteTopicMaxRate;
+    }
+
+    public void setBatchDeleteTopicMaxRate(double batchDeleteTopicMaxRate) {
+        this.batchDeleteTopicMaxRate = batchDeleteTopicMaxRate;
+    }
+
+    public double getBatchDeleteSubscriptionGroupMaxRate() {
+        return batchDeleteSubscriptionGroupMaxRate;
+    }
+
+    public void setBatchDeleteSubscriptionGroupMaxRate(double batchDeleteSubscriptionGroupMaxRate) {
+        this.batchDeleteSubscriptionGroupMaxRate = batchDeleteSubscriptionGroupMaxRate;
     }
 
     public boolean isEstimateAccumulation() {
@@ -2290,13 +2410,6 @@ public class BrokerConfig extends BrokerIdentity {
         this.useSeparateRetryQueue = useSeparateRetryQueue;
     }
 
-    public boolean isEnableLiteEventMode() {
-        return enableLiteEventMode;
-    }
-
-    public void setEnableLiteEventMode(boolean enableLiteEventMode) {
-        this.enableLiteEventMode = enableLiteEventMode;
-    }
 
     public long getLiteEventCheckInterval() {
         return liteEventCheckInterval;
@@ -2370,12 +2483,28 @@ public class BrokerConfig extends BrokerIdentity {
         this.maxClientEventCount = maxClientEventCount;
     }
 
+    public long getLiteEventCapacityCacheTtlMs() {
+        return liteEventCapacityCacheTtlMs;
+    }
+
+    public void setLiteEventCapacityCacheTtlMs(long liteEventCapacityCacheTtlMs) {
+        this.liteEventCapacityCacheTtlMs = liteEventCapacityCacheTtlMs;
+    }
+
     public long getLiteEventFullDispatchDelayTime() {
         return liteEventFullDispatchDelayTime;
     }
 
     public void setLiteEventFullDispatchDelayTime(long liteEventFullDispatchDelayTime) {
         this.liteEventFullDispatchDelayTime = liteEventFullDispatchDelayTime;
+    }
+
+    public long getLiteEventFullDispatchDelayTimeForWildcardGroup() {
+        return liteEventFullDispatchDelayTimeForWildcardGroup;
+    }
+
+    public void setLiteEventFullDispatchDelayTimeForWildcardGroup(long liteEventFullDispatchDelayTimeForWildcardGroup) {
+        this.liteEventFullDispatchDelayTimeForWildcardGroup = liteEventFullDispatchDelayTimeForWildcardGroup;
     }
 
     public boolean isLiteLagLatencyCollectEnable() {
@@ -2408,6 +2537,22 @@ public class BrokerConfig extends BrokerIdentity {
 
     public void setLiteLagLatencyTopK(int liteLagLatencyTopK) {
         this.liteLagLatencyTopK = liteLagLatencyTopK;
+    }
+
+    public long getPopOrderLockTimerTickMs() {
+        return popOrderLockTimerTickMs;
+    }
+
+    public void setPopOrderLockTimerTickMs(long popOrderLockTimerTickMs) {
+        this.popOrderLockTimerTickMs = popOrderLockTimerTickMs;
+    }
+
+    public int getPopOrderLockTimerTicksPerWheel() {
+        return popOrderLockTimerTicksPerWheel;
+    }
+
+    public void setPopOrderLockTimerTicksPerWheel(int popOrderLockTimerTicksPerWheel) {
+        this.popOrderLockTimerTicksPerWheel = popOrderLockTimerTicksPerWheel;
     }
 
     public boolean isUseMessageFilterForNotification() {

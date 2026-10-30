@@ -51,7 +51,7 @@ public class ConsumerOffsetManager extends ConfigManager {
     protected final ConcurrentMap<String, ConcurrentMap<Integer, Long>> resetOffsetTable =
         new ConcurrentHashMap<>(512);
 
-    private final ConcurrentMap<String/* topic@group */, ConcurrentMap<Integer, Long>> pullOffsetTable =
+    private final transient ConcurrentMap<String/* topic@group */, ConcurrentMap<Integer, Long>> pullOffsetTable =
         new ConcurrentHashMap<>(512);
 
     protected transient BrokerController brokerController;
@@ -86,21 +86,21 @@ public class ConsumerOffsetManager extends ConfigManager {
     }
 
     public void cleanOffsetByTopic(String topic) {
-        Iterator<Entry<String, ConcurrentMap<Integer, Long>>> it = this.offsetTable.entrySet().iterator();
-        while (it.hasNext()) {
-            Entry<String, ConcurrentMap<Integer, Long>> next = it.next();
-            String topicAtGroup = next.getKey();
+
+        this.offsetTable.entrySet().removeIf(entry -> {
+            String topicAtGroup = entry.getKey();
             if (topicAtGroup.contains(topic)) {
                 String[] arrays = topicAtGroup.split(TOPIC_GROUP_SEPARATOR);
                 if (arrays.length == 2 && topic.equals(arrays[0])) {
-                    it.remove();
                     removeConsumerOffset(topicAtGroup);
                     pullOffsetTable.remove(topicAtGroup);
                     resetOffsetTable.remove(topicAtGroup);
-                    LOG.warn("Clean topic's offset, {}, {}", topicAtGroup, next.getValue());
+                    LOG.warn("Clean topic's offset, {}, {}", topicAtGroup, entry.getValue());
+                    return true;
                 }
             }
-        }
+            return false;
+        });
     }
 
     public void scanUnsubscribedTopic() {
@@ -466,8 +466,21 @@ public class ConsumerOffsetManager extends ConfigManager {
         ConcurrentMap<Integer, Long> map = resetOffsetTable.get(key);
         if (null == map) {
             return null;
-        } else {
-            return map.remove(queueId);
         }
+        Long offset = map.remove(queueId);
+        if (map.isEmpty()) {
+            resetOffsetTable.computeIfPresent(key, (k, _map) ->
+                _map.isEmpty() ? null : _map
+            );
+        }
+        return offset;
+    }
+
+    public void eraseResetOffset(String topic, String group, int queueId) {
+        String key = topic + TOPIC_GROUP_SEPARATOR + group;
+        resetOffsetTable.computeIfPresent(key, (k, map) -> {
+            map.remove(queueId);
+            return map.isEmpty() ? null : map;
+        });
     }
 }

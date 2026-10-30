@@ -20,6 +20,7 @@ package org.apache.rocketmq.broker.lite;
 import io.netty.channel.Channel;
 
 import java.util.List;
+import java.util.Map;
 import java.util.Set;
 import org.apache.rocketmq.common.entity.ClientGroup;
 import org.apache.rocketmq.common.lite.LiteSubscription;
@@ -43,11 +44,15 @@ public interface LiteSubscriptionRegistry {
 
     void addListener(LiteCtlListener listener);
 
-    Set<ClientGroup> getSubscriber(String lmqName);
+    Map<String, List<ClientGroup>> getAllSubscribers(String group, String lmqName);
+
+    List<ClientGroup> getWildcardGroupClients(String group);
 
     List<String> getAllClientIdByGroup(String group);
 
     void cleanSubscription(String lmqName, boolean notifyClient);
+
+    boolean hasExclusiveEvictionTombstone(String clientId, String lmqName);
 
     void start();
 

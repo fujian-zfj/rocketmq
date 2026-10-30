@@ -17,25 +17,23 @@
 
 package org.apache.rocketmq.broker.lite;
 
-import org.apache.commons.lang3.StringUtils;
 import org.apache.commons.lang3.reflect.FieldUtils;
+import org.apache.commons.lang3.tuple.Triple;
 import org.apache.rocketmq.broker.BrokerController;
-import org.apache.rocketmq.common.Pair;
 import org.apache.rocketmq.common.constant.LoggerName;
 import org.apache.rocketmq.common.lite.LiteUtil;
 import org.apache.rocketmq.logging.org.slf4j.Logger;
 import org.apache.rocketmq.logging.org.slf4j.LoggerFactory;
 import org.apache.rocketmq.store.RocksDBMessageStore;
+import org.apache.rocketmq.store.queue.CombineConsumeQueueStore;
 import org.apache.rocketmq.store.queue.RocksDBConsumeQueueOffsetTable;
 import org.apache.rocketmq.store.queue.RocksDBConsumeQueueStore;
 import org.apache.rocketmq.tieredstore.TieredMessageStore;
 
-import java.util.ArrayList;
 import java.util.Collections;
-import java.util.Iterator;
-import java.util.List;
 import java.util.Map;
 import java.util.concurrent.ConcurrentMap;
+import java.util.function.Function;
 
 public class RocksDBLiteLifecycleManager extends AbstractLiteLifecycleManager {
     private static final Logger LOGGER = LoggerFactory.getLogger(LoggerName.ROCKETMQ_POP_LITE_LOGGER_NAME);
@@ -52,54 +50,30 @@ public class RocksDBLiteLifecycleManager extends AbstractLiteLifecycleManager {
     }
 
     @Override
-    public List<String> collectByParentTopic(String parentTopic) {
-        if (StringUtils.isEmpty(parentTopic)) {
-            return Collections.emptyList();
-        }
-        List<String> resultList = new ArrayList<>();
-        Iterator<Map.Entry<String, Long>> iterator = maxCqOffsetTable.entrySet().iterator();
-        while (iterator.hasNext()) {
-            Map.Entry<String, Long> entry = iterator.next();
-            String queueAndQid = entry.getKey();
-            String lmqName = queueAndQid.substring(0, queueAndQid.lastIndexOf("-"));
-            if (LiteUtil.belongsTo(lmqName, parentTopic)) {
-                resultList.add(lmqName);
-            }
-        }
-        return resultList;
-    }
-
-    @Override
-    public List<Pair<String, String>> collectExpiredLiteTopic() {
-        List<Pair<String, String>> lmqToDelete = new ArrayList<>();
-        Iterator<Map.Entry<String, Long>> iterator = maxCqOffsetTable.entrySet().iterator();
-        while (iterator.hasNext()) {
-            Map.Entry<String, Long> entry = iterator.next();
-            String queueAndQid = entry.getKey();
-            String lmqName = queueAndQid.substring(0, queueAndQid.lastIndexOf("-"));
-            String parentTopic = LiteUtil.getParentTopic(lmqName);
-            if (null == parentTopic) {
-                continue;
-            }
-            if (isLiteTopicExpired(parentTopic, lmqName, entry.getValue() + 1)) {
-                lmqToDelete.add(new Pair<>(parentTopic, lmqName));
-            }
-        }
-        return lmqToDelete;
-    }
-
-    @Override
-    public void init() {
+    public boolean init() {
         super.init();
         if (messageStore instanceof TieredMessageStore) { // only support TieredMessageStore plugin
             messageStore = ((TieredMessageStore) messageStore).getDefaultStore();
         }
-        if (!(messageStore instanceof RocksDBMessageStore)) {
-            LOGGER.warn("init failed, not a RocksDB store. {}", messageStore.getClass());
-            return; // startup with lite feature disabled
+
+        RocksDBConsumeQueueStore queueStore; // underlay rocksdb consume queue store
+        if (messageStore instanceof RocksDBMessageStore) { // storeType = defaultRocksDB
+            queueStore = (RocksDBConsumeQueueStore) messageStore.getQueueStore();
+        } else { // storeType = default && double write enable
+            if (!(messageStore.getQueueStore() instanceof CombineConsumeQueueStore)) {
+                LOGGER.warn("unexpected, not a CombineConsumeQueueStore. {}", messageStore.getQueueStore().getClass());
+                return false; // abort startup
+            }
+            CombineConsumeQueueStore combineConsumeQueueStore = (CombineConsumeQueueStore) messageStore.getQueueStore();
+            queueStore = combineConsumeQueueStore.getRocksDBConsumeQueueStore();
+            if (!messageStore.getMessageStoreConfig().isCombineCQUseRocksdbForLmq() || null == queueStore) {
+                LOGGER.warn("unexpected, rocksdbCQ is not ready for LMQ.");
+                return false; // abort startup
+            }
+            LOGGER.info("LiteLifecycleManager init with CombineConsumeQueueStore.");
         }
+
         try {
-            RocksDBConsumeQueueStore queueStore = (RocksDBConsumeQueueStore) messageStore.getQueueStore();
             RocksDBConsumeQueueOffsetTable cqOffsetTable = (RocksDBConsumeQueueOffsetTable) FieldUtils.readField(
                 FieldUtils.getField(RocksDBConsumeQueueStore.class, "rocksDBConsumeQueueOffsetTable", true), queueStore);
             @SuppressWarnings("unchecked")
@@ -108,6 +82,28 @@ public class RocksDBLiteLifecycleManager extends AbstractLiteLifecycleManager {
             maxCqOffsetTable = Collections.unmodifiableMap(innerMaxCqOffsetTable);
         } catch (Exception e) {
             LOGGER.error("LiteLifecycleManager-init error", e);
+            return false;
+        }
+        return true;
+    }
+
+    @Override
+    public void forEachLiteTopic(Function<Triple<String, Long, Long>, Boolean> function) {
+        for (Map.Entry<String, Long> entry : maxCqOffsetTable.entrySet()) {
+            String queueAndQid = entry.getKey();
+            String queueName = queueAndQid.substring(0, queueAndQid.lastIndexOf("-"));
+            if (!LiteUtil.isLiteTopicQueue(queueName)) {
+                continue;
+            }
+            Triple<String, Long, Long> triple = Triple.of(queueName, entry.getValue() + 1, null);
+            try {
+                if (!function.apply(triple)) {
+                    break;
+                }
+            } catch (Throwable e) {
+                LOGGER.error("forEachLiteTopic error. {}", queueName, e);
+                break;
+            }
         }
     }
 }

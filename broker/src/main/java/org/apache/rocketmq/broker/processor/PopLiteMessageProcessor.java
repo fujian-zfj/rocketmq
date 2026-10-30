@@ -22,6 +22,7 @@ import io.netty.channel.ChannelHandlerContext;
 import io.opentelemetry.api.common.Attributes;
 import org.apache.rocketmq.broker.BrokerController;
 import org.apache.rocketmq.broker.lite.LiteEventDispatcher;
+import org.apache.rocketmq.broker.lite.LiteMetadataUtil;
 import org.apache.rocketmq.broker.longpolling.PollingResult;
 import org.apache.rocketmq.broker.longpolling.PopLiteLongPollingService;
 import org.apache.rocketmq.broker.metrics.LiteConsumerLagCalculator;
@@ -93,11 +94,6 @@ public class PopLiteMessageProcessor implements NettyRequestProcessor {
         this.liteEventDispatcher = liteEventDispatcher;
         this.consumerOrderInfoManager = new MemoryConsumerOrderInfoManager(brokerController);
         this.popLiteLockManager = new PopLiteLockManager();
-    }
-
-    @Override
-    public boolean rejectRequest() {
-        return false;
     }
 
     @Override
@@ -253,6 +249,7 @@ public class PopLiteMessageProcessor implements NettyRequestProcessor {
         StringBuilder orderCountInfoAll = new StringBuilder();
         AtomicLong total = new AtomicLong(0);
 
+        boolean isExclusiveGroup = LiteMetadataUtil.isSubLiteExclusive(group, brokerController);
         Set<String> processed = new HashSet<>(); // deduplication in one request
         Iterator<String> iterator = liteEventDispatcher.getEventIterator(clientId);
         while (total.get() < maxNum && iterator.hasNext()) {
@@ -260,11 +257,18 @@ public class PopLiteMessageProcessor implements NettyRequestProcessor {
             if (null == lmqName) {
                 break;
             }
-            if (!processed.add(lmqName)) {
-                continue; // wait for next pop request or re-fetch in current process, here prefer the former approach
+            if (processed.contains(lmqName)) {
+                // Already read in this pop; skip the duplicate. A FIFO-blocked or empty-read lmq is never marked
+                // by popLiteTopic, so its later re-dispatch (ack-unblock or CQ commit) is retried, not deduped away.
+                continue;
+            }
+            // Tombstone check: reject pull if this client was evicted from the liteTopic (exclusive mode)
+            if (isExclusiveGroup && brokerController.getLiteSubscriptionRegistry().hasExclusiveEvictionTombstone(clientId, lmqName)) {
+                LOGGER.info("popLiteTopic rejected by tombstone: clientId={}, group={}, lmqName={}", clientId, group, lmqName);
+                continue;
             }
             Pair<StringBuilder, GetMessageResult> pair = popLiteTopic(parentTopic, clientHost, group, lmqName,
-                maxNum - total.get(), popTime, invisibleTime, attemptId);
+                maxNum - total.get(), popTime, invisibleTime, attemptId, processed);
             if (null == pair || pair.getObject2().getMessageCount() <= 0) {
                 continue;
             }
@@ -283,22 +287,24 @@ public class PopLiteMessageProcessor implements NettyRequestProcessor {
     }
 
     @VisibleForTesting
-    public Pair<StringBuilder, GetMessageResult> popLiteTopic(String parentTopic, String clientHost, String group,
-        String lmqName, long maxNum, long popTime, long invisibleTime, String attemptId) {
-        if (!brokerController.getBrokerConfig().isEnableLiteEventMode()
-            && !brokerController.getLiteLifecycleManager().isLmqExist(lmqName)) {
-            return null;
-        }
+    Pair<StringBuilder, GetMessageResult> popLiteTopic(String parentTopic, String clientHost, String group,
+        String lmqName, long maxNum, long popTime, long invisibleTime, String attemptId, Set<String> processed) {
         String lockKey = KeyBuilder.buildPopLiteLockKey(group, lmqName);
         if (!lockService.tryLock(lockKey)) {
             return null;
         }
         try {
             if (isFifoBlocked(attemptId, group, lmqName, invisibleTime)) {
+                // Leave this lmq unmarked so a later ack-unblock re-dispatch is retried, not deduped away.
                 return null;
             }
             final long consumeOffset = getPopOffset(group, lmqName);
             GetMessageResult result = getMessage(clientHost, group, lmqName, consumeOffset, (int) maxNum);
+            if (result != null && result.getMessageCount() > 0) {
+                // Mark only after messages are read: an empty read (e.g. CQ entry not yet committed) must not
+                // dedup away a later re-dispatch of this lmq within the same pop.
+                processed.add(lmqName);
+            }
             return handleGetMessageResult(result, parentTopic, group, lmqName, popTime, invisibleTime, attemptId);
         } catch (Throwable e) {
             LOGGER.error("popLiteTopic error. {}, {}", group, lmqName, e);
@@ -309,6 +315,10 @@ public class PopLiteMessageProcessor implements NettyRequestProcessor {
     }
 
     public boolean isFifoBlocked(String attemptId, String group, String lmqName, long invisibleTime) {
+        if (brokerController.getBrokerConfig().isUseServerSideResetOffset() &&
+            this.brokerController.getConsumerOffsetManager().hasOffsetReset(lmqName, group, 0)) {
+            return false;
+        }
         return consumerOrderInfoManager.checkBlock(attemptId, lmqName, group, 0, invisibleTime);
     }
 
@@ -438,6 +448,9 @@ public class PopLiteMessageProcessor implements NettyRequestProcessor {
     }
 
     public class PopLiteLockManager extends ServiceThread {
+        private static final long AUTO_CLEAN_INTERVAL = 5 * 60 * 1000;
+        private long lastCleanTime = System.currentTimeMillis();
+
         @Override
         public String getServiceName() {
             if (brokerController.getBrokerConfig().isInBrokerContainer()) {
@@ -452,6 +465,10 @@ public class PopLiteMessageProcessor implements NettyRequestProcessor {
                 try {
                     waitForRunning(60000);
                     lockService.removeTimeout();
+                    if (System.currentTimeMillis() - lastCleanTime >= AUTO_CLEAN_INTERVAL) {
+                        ((MemoryConsumerOrderInfoManager) consumerOrderInfoManager).autoClean();
+                        lastCleanTime = System.currentTimeMillis();
+                    }
                 } catch (Exception ignored) {
                 }
             }

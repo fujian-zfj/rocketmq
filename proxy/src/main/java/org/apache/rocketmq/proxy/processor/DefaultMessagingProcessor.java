@@ -23,6 +23,7 @@ import java.util.Set;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ThreadPoolExecutor;
 import java.util.concurrent.TimeUnit;
+import java.util.function.Supplier;
 import org.apache.commons.lang3.StringUtils;
 import org.apache.rocketmq.acl.common.AclClientRPCHook;
 import org.apache.rocketmq.acl.common.AclUtils;
@@ -204,16 +205,6 @@ public class DefaultMessagingProcessor extends AbstractStartAndShutdown implemen
     }
 
     @Override
-    public CompletableFuture<PopResult> popLiteMessage(ProxyContext ctx, QueueSelector queueSelector,
-        String consumerGroup, String topic, int maxMsgNums, long invisibleTime, long pollTime,
-        SubscriptionData subscriptionData, PopMessageResultFilter popMessageResultFilter,
-        String attemptId, long timeoutMillis) {
-        return this.consumerProcessor.popLiteMessage(ctx, queueSelector,
-            consumerGroup, topic, maxMsgNums, invisibleTime, pollTime,
-            subscriptionData, popMessageResultFilter, attemptId, timeoutMillis);
-    }
-
-    @Override
     public CompletableFuture<AckResult> ackMessage(ProxyContext ctx, ReceiptHandle handle, String messageId,
         String consumerGroup, String topic, long timeoutMillis) {
         return this.consumerProcessor.ackMessage(ctx, handle, messageId, consumerGroup, topic, null, timeoutMillis);
@@ -304,10 +295,8 @@ public class DefaultMessagingProcessor extends AbstractStartAndShutdown implemen
         long timeoutMillis) {
         int originalRequestOpaque = request.getOpaque();
         request.setOpaque(RemotingCommand.createNewRequestId());
-        return this.requestBrokerProcessor.request(ctx, brokerName, request, timeoutMillis).thenApply(r -> {
-            request.setOpaque(originalRequestOpaque);
-            return r;
-        });
+        return restoreRequestOpaque(request, originalRequestOpaque,
+            () -> this.requestBrokerProcessor.request(ctx, brokerName, request, timeoutMillis));
     }
 
     @Override
@@ -315,10 +304,18 @@ public class DefaultMessagingProcessor extends AbstractStartAndShutdown implemen
         long timeoutMillis) {
         int originalRequestOpaque = request.getOpaque();
         request.setOpaque(RemotingCommand.createNewRequestId());
-        return this.requestBrokerProcessor.requestOneway(ctx, brokerName, request, timeoutMillis).thenApply(r -> {
+        return restoreRequestOpaque(request, originalRequestOpaque,
+            () -> this.requestBrokerProcessor.requestOneway(ctx, brokerName, request, timeoutMillis));
+    }
+
+    private <T> CompletableFuture<T> restoreRequestOpaque(RemotingCommand request, int originalRequestOpaque,
+        Supplier<CompletableFuture<T>> requestFutureSupplier) {
+        try {
+            return requestFutureSupplier.get().whenComplete((r, t) -> request.setOpaque(originalRequestOpaque));
+        } catch (RuntimeException t) {
             request.setOpaque(originalRequestOpaque);
-            return r;
-        });
+            throw t;
+        }
     }
 
     @Override
@@ -386,6 +383,10 @@ public class DefaultMessagingProcessor extends AbstractStartAndShutdown implemen
     @Override
     public MetadataService getMetadataService() {
         return this.serviceManager.getMetadataService();
+    }
+
+    public ServiceManager getServiceManager() {
+        return this.serviceManager;
     }
 
     @Override

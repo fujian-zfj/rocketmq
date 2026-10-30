@@ -28,11 +28,14 @@ import java.net.UnknownHostException;
 import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
 import java.util.Arrays;
+import java.util.Collection;
 import java.util.HashMap;
 import java.util.HashSet;
 import java.util.Iterator;
+import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
+import java.util.Objects;
 import java.util.Optional;
 import java.util.Properties;
 import java.util.Set;
@@ -128,6 +131,8 @@ import org.apache.rocketmq.remoting.protocol.body.ConsumeQueueData;
 import org.apache.rocketmq.remoting.protocol.body.ConsumeStatsList;
 import org.apache.rocketmq.remoting.protocol.body.ConsumerConnection;
 import org.apache.rocketmq.remoting.protocol.body.CreateTopicListRequestBody;
+import org.apache.rocketmq.remoting.protocol.body.DeleteSubscriptionGroupListRequestBody;
+import org.apache.rocketmq.remoting.protocol.body.DeleteTopicListRequestBody;
 import org.apache.rocketmq.remoting.protocol.body.EpochEntryCache;
 import org.apache.rocketmq.remoting.protocol.body.GroupList;
 import org.apache.rocketmq.remoting.protocol.body.HARuntimeInfo;
@@ -270,6 +275,8 @@ public class AdminBrokerProcessor implements NettyRequestProcessor {
                 return this.updateAndCreateTopicList(ctx, request);
             case RequestCode.DELETE_TOPIC_IN_BROKER:
                 return this.deleteTopic(ctx, request);
+            case RequestCode.DELETE_TOPIC_IN_BROKER_LIST:
+                return this.deleteTopicList(ctx, request);
             case RequestCode.GET_ALL_TOPIC_CONFIG:
                 return this.getAllTopicConfig(ctx, request);
             case RequestCode.GET_TIMER_CHECK_POINT:
@@ -310,6 +317,8 @@ public class AdminBrokerProcessor implements NettyRequestProcessor {
                 return this.getAllSubscriptionGroup(ctx, request);
             case RequestCode.DELETE_SUBSCRIPTIONGROUP:
                 return this.deleteSubscriptionGroup(ctx, request);
+            case RequestCode.DELETE_SUBSCRIPTION_GROUP_LIST:
+                return this.deleteSubscriptionGroupList(ctx, request);
             case RequestCode.GET_TOPIC_STATS_INFO:
                 return this.getTopicStatsInfo(ctx, request);
             case RequestCode.GET_CONSUMER_CONNECTION_LIST:
@@ -542,11 +551,6 @@ public class AdminBrokerProcessor implements NettyRequestProcessor {
         return response;
     }
 
-    @Override
-    public boolean rejectRequest() {
-        return false;
-    }
-
     private synchronized RemotingCommand updateAndCreateTopic(ChannelHandlerContext ctx,
         RemotingCommand request) throws RemotingCommandException {
         long startTime = System.currentTimeMillis();
@@ -758,7 +762,7 @@ public class AdminBrokerProcessor implements NettyRequestProcessor {
         return response;
     }
 
-    private synchronized RemotingCommand deleteTopic(ChannelHandlerContext ctx,
+    private RemotingCommand deleteTopic(ChannelHandlerContext ctx,
         RemotingCommand request) throws RemotingCommandException {
         final RemotingCommand response = RemotingCommand.createResponseCommand(null);
         DeleteTopicRequestHeader requestHeader =
@@ -787,17 +791,7 @@ public class AdminBrokerProcessor implements NettyRequestProcessor {
         topicsToClean.add(topic);
 
         if (brokerController.getBrokerConfig().isClearRetryTopicWhenDeleteTopic()) {
-            final Set<String> groups = this.brokerController.getConsumerOffsetManager().whichGroupByTopic(topic);
-            for (String group : groups) {
-                final String popRetryTopicV2 = KeyBuilder.buildPopRetryTopic(topic, group, true);
-                if (brokerController.getTopicConfigManager().selectTopicConfig(popRetryTopicV2) != null) {
-                    topicsToClean.add(popRetryTopicV2);
-                }
-                final String popRetryTopicV1 = KeyBuilder.buildPopRetryTopicV1(topic, group);
-                if (brokerController.getTopicConfigManager().selectTopicConfig(popRetryTopicV1) != null) {
-                    topicsToClean.add(popRetryTopicV1);
-                }
-            }
+            collectPopRetryTopics(topic, topicsToClean);
         }
 
         try {
@@ -816,13 +810,105 @@ public class AdminBrokerProcessor implements NettyRequestProcessor {
         return response;
     }
 
-    private void deleteTopicInBroker(String topic) {
-        this.brokerController.getTopicConfigManager().deleteTopicConfig(topic);
+    private synchronized RemotingCommand deleteTopicList(ChannelHandlerContext ctx,
+        RemotingCommand request) {
+        final RemotingCommand response = RemotingCommand.createResponseCommand(null);
+
+        DeleteTopicListRequestBody requestBody = DeleteTopicListRequestBody.decode(
+            request.getBody(), DeleteTopicListRequestBody.class);
+        List<String> topicList = requestBody == null ? null : requestBody.getTopicList();
+
+        if (CollectionUtils.isEmpty(topicList)) {
+            response.setCode(ResponseCode.INVALID_PARAMETER);
+            response.setRemark("The specified topic list is blank.");
+            return response;
+        }
+
+        LOGGER.info("AdminBrokerProcessor#deleteTopicList: broker receive request to delete topics={}, caller={}",
+            topicList, RemotingHelper.parseChannelRemoteAddr(ctx.channel()));
+
+        boolean validateSystemTopic = brokerController.getBrokerConfig().isValidateSystemTopicWhenUpdateTopic();
+        // dedup while preserving the input order
+        Set<String> topicsToClean = new LinkedHashSet<>();
+        for (String topic : topicList) {
+            if (UtilAll.isBlank(topic)) {
+                response.setCode(ResponseCode.INVALID_PARAMETER);
+                response.setRemark("The specified topic is blank.");
+                return response;
+            }
+            if (validateSystemTopic && TopicValidator.isSystemTopic(topic)) {
+                response.setCode(ResponseCode.INVALID_PARAMETER);
+                response.setRemark("The topic[" + topic + "] is conflict with system topic.");
+                return response;
+            }
+            topicsToClean.add(topic);
+        }
+
+        if (brokerController.getBrokerConfig().isClearRetryTopicWhenDeleteTopic()) {
+            // snapshot the inputs before mutating the set, so retry topics for already-added retry topics are not collected
+            for (String topic : new ArrayList<>(topicsToClean)) {
+                collectPopRetryTopics(topic, topicsToClean);
+            }
+        }
+
+        boolean isSuccess = false;
+        try {
+            double maxRate = this.brokerController.getBrokerConfig().getBatchDeleteTopicMaxRate();
+            com.google.common.util.concurrent.RateLimiter rateLimiter = maxRate > 0
+                ? com.google.common.util.concurrent.RateLimiter.create(maxRate) : null;
+
+            for (String topic : topicsToClean) {
+                if (rateLimiter != null) {
+                    rateLimiter.acquire();
+                }
+                if (LiteMetadataUtil.isLiteMessageType(topic, brokerController)) {
+                    brokerController.getLiteLifecycleManager().cleanByParentTopic(topic);
+                }
+                deleteTopicInBroker(topic, false);
+            }
+            isSuccess  = true;
+        } catch (Throwable t) {
+            LOGGER.error("Failed to delete topic ", t);
+        } finally {
+            try {
+                this.brokerController.getTopicConfigManager().persist();
+            } catch (Throwable t) {
+                isSuccess = false;
+                LOGGER.error("Failed to persist topic config after batch delete", t);
+            }
+        }
+
+        response.setCode(isSuccess ? ResponseCode.SUCCESS : ResponseCode.SYSTEM_ERROR);
+        response.setRemark(null);
+
+        return response;
+    }
+
+    private void collectPopRetryTopics(String topic, Collection<String> topicsToClean) {
+        final Set<String> groups = this.brokerController.getConsumerOffsetManager().whichGroupByTopic(topic);
+        for (String group : groups) {
+            final String popRetryTopicV2 = KeyBuilder.buildPopRetryTopic(topic, group, true);
+            if (brokerController.getTopicConfigManager().selectTopicConfig(popRetryTopicV2) != null) {
+                topicsToClean.add(popRetryTopicV2);
+            }
+            final String popRetryTopicV1 = KeyBuilder.buildPopRetryTopicV1(topic, group);
+            if (brokerController.getTopicConfigManager().selectTopicConfig(popRetryTopicV1) != null) {
+                topicsToClean.add(popRetryTopicV1);
+            }
+        }
+    }
+
+    private void deleteTopicInBroker(String topic, boolean persist) {
+        this.brokerController.getTopicConfigManager().deleteTopicConfig(topic, persist);
         this.brokerController.getTopicQueueMappingManager().delete(topic);
         this.brokerController.getConsumerOffsetManager().cleanOffsetByTopic(topic);
         this.brokerController.getPopInflightMessageCounter().clearInFlightMessageNumByTopicName(topic);
         this.brokerController.getMessageStore().deleteTopics(Sets.newHashSet(topic));
         this.brokerController.getMessageStore().getTimerMessageStore().getTimerMetrics().removeTimingCount(topic);
+    }
+
+    private void deleteTopicInBroker(String topic) {
+        deleteTopicInBroker(topic, true);
     }
 
     private RemotingCommand getUnknownCmdResponse(ChannelHandlerContext ctx, RemotingCommand request) {
@@ -885,7 +971,7 @@ public class AdminBrokerProcessor implements NettyRequestProcessor {
 
     private RemotingCommand getTimerCheckPoint(ChannelHandlerContext ctx, RemotingCommand request) {
         final RemotingCommand response = RemotingCommand.createResponseCommand(ResponseCode.SYSTEM_ERROR, "Unknown");
-        TimerCheckpoint timerCheckpoint = this.brokerController.getTimerCheckpoint();
+        TimerCheckpoint timerCheckpoint = this.brokerController.getTimerMessageStore().getTimerCheckpoint();
         if (null == timerCheckpoint) {
             LOGGER.error("AdminBrokerProcessor#getTimerCheckPoint: checkpoint is null, caller={}", ctx.channel().remoteAddress());
             response.setCode(ResponseCode.SYSTEM_ERROR);
@@ -1092,8 +1178,16 @@ public class AdminBrokerProcessor implements NettyRequestProcessor {
         final RemotingCommand response = RemotingCommand.createResponseCommand(GetBrokerConfigResponseHeader.class);
         final GetBrokerConfigResponseHeader responseHeader = (GetBrokerConfigResponseHeader) response.readCustomHeader();
 
-        String content = this.brokerController.getConfiguration().getAllConfigsFormatString();
-        if (content != null && content.length() > 0) {
+        String content = sanitizeConfigForResponse(
+            this.brokerController.getConfiguration().getAllConfigsSnapshot());
+        if (content == null) {
+            LOGGER.error("AdminBrokerProcessor#getBrokerConfig: failed to sanitize broker config, caller={}",
+                RemotingHelper.parseChannelRemoteAddr(ctx.channel()));
+            response.setCode(ResponseCode.SYSTEM_ERROR);
+            response.setRemark("Failed to sanitize broker config");
+            return response;
+        }
+        if (content.length() > 0) {
             try {
                 content = MixAll.adjustConfigForPlatform(content);
                 response.setBody(content.getBytes(MixAll.DEFAULT_CHARSET));
@@ -1112,6 +1206,26 @@ public class AdminBrokerProcessor implements NettyRequestProcessor {
         response.setCode(ResponseCode.SUCCESS);
         response.setRemark(null);
         return response;
+    }
+
+    // sensitive config keys that must never be returned by config query interfaces
+    private static final String[] SENSITIVE_CONFIG_KEYS = new String[] {
+        "initAuthenticationUser", "innerClientAuthenticationCredentials"
+    };
+
+    /**
+     * Remove sensitive entries from a snapshot of the broker configuration.
+     */
+    static String sanitizeConfigForResponse(Properties source) {
+        if (source == null) {
+            return null;
+        }
+        Properties properties = new Properties();
+        properties.putAll(source);
+        for (String key : SENSITIVE_CONFIG_KEYS) {
+            properties.remove(key);
+        }
+        return MixAll.properties2String(properties, true);
     }
 
     private RemotingCommand rewriteRequestForStaticTopic(SearchOffsetRequestHeader requestHeader,
@@ -1698,18 +1812,88 @@ public class AdminBrokerProcessor implements NettyRequestProcessor {
         LOGGER.info("AdminBrokerProcessor#deleteSubscriptionGroup, caller={}",
             RemotingHelper.parseChannelRemoteAddr(ctx.channel()));
 
-        this.brokerController.getSubscriptionGroupManager().deleteSubscriptionGroupConfig(requestHeader.getGroupName());
+        boolean cleanOffset = requestHeader.isCleanOffset()
+            || LiteMetadataUtil.isLiteGroupType(requestHeader.getGroupName(), this.brokerController);
+        deleteSubscriptionGroupInBroker(requestHeader.getGroupName(), cleanOffset);
 
-        if (requestHeader.isCleanOffset()
-            || LiteMetadataUtil.isLiteGroupType(requestHeader.getGroupName(), this.brokerController)) {
-            this.brokerController.getConsumerOffsetManager().removeOffset(requestHeader.getGroupName());
-            this.brokerController.getPopInflightMessageCounter().clearInFlightMessageNumByGroupName(requestHeader.getGroupName());
-        }
-
-        if (this.brokerController.getBrokerConfig().isAutoDeleteUnusedStats()) {
-            this.brokerController.getBrokerStatsManager().onGroupDeleted(requestHeader.getGroupName());
-        }
         response.setCode(ResponseCode.SUCCESS);
+        response.setRemark(null);
+        return response;
+    }
+
+    private void deleteSubscriptionGroupInBroker(String groupName, boolean cleanOffset) {
+        deleteSubscriptionGroupInBroker(groupName, cleanOffset, true);
+    }
+
+    private void deleteSubscriptionGroupInBroker(String groupName, boolean cleanOffset, boolean persist) {
+        this.brokerController.getSubscriptionGroupManager().deleteSubscriptionGroupConfig(groupName, persist);
+        if (cleanOffset) {
+            this.brokerController.getConsumerOffsetManager().removeOffset(groupName);
+            this.brokerController.getPopInflightMessageCounter().clearInFlightMessageNumByGroupName(groupName);
+        }
+        if (this.brokerController.getBrokerConfig().isAutoDeleteUnusedStats()) {
+            this.brokerController.getBrokerStatsManager().onGroupDeleted(groupName);
+        }
+    }
+
+    private RemotingCommand deleteSubscriptionGroupList(ChannelHandlerContext ctx,
+        RemotingCommand request) {
+        final RemotingCommand response = RemotingCommand.createResponseCommand(null);
+
+        DeleteSubscriptionGroupListRequestBody requestBody = DeleteSubscriptionGroupListRequestBody.decode(
+            request.getBody(), DeleteSubscriptionGroupListRequestBody.class);
+        List<String> groupNameList = requestBody == null ? null : requestBody.getGroupNameList();
+
+        if (CollectionUtils.isEmpty(groupNameList)) {
+            response.setCode(ResponseCode.INVALID_PARAMETER);
+            response.setRemark("The specified group name list is blank.");
+            return response;
+        }
+
+        // dedup while preserving the input order
+        Set<String> groupNames = new LinkedHashSet<>();
+        for (String groupName : groupNameList) {
+            if (UtilAll.isBlank(groupName)) {
+                response.setCode(ResponseCode.INVALID_PARAMETER);
+                response.setRemark("The specified group name is blank.");
+                return response;
+            }
+            groupNames.add(groupName);
+        }
+
+        LOGGER.info("AdminBrokerProcessor#deleteSubscriptionGroupList: groupNames={}, caller={}",
+            groupNames, RemotingHelper.parseChannelRemoteAddr(ctx.channel()));
+
+        boolean isSuccess = false;
+        try {
+            boolean cleanOffset = requestBody.isCleanOffset();
+            double maxRate = this.brokerController.getBrokerConfig().getBatchDeleteSubscriptionGroupMaxRate();
+            com.google.common.util.concurrent.RateLimiter rateLimiter = maxRate > 0
+                ? com.google.common.util.concurrent.RateLimiter.create(maxRate) : null;
+
+            // Check isLiteGroupType before deletion: once the group config is removed,
+            // findSubscriptionGroupConfig(...) may auto-recreate the group when
+            // autoCreateSubscriptionGroup=true.
+            for (String groupName : groupNames) {
+                if (rateLimiter != null) {
+                    rateLimiter.acquire();
+                }
+                boolean shouldCleanOffset = cleanOffset
+                    || LiteMetadataUtil.isLiteGroupType(groupName, this.brokerController);
+                deleteSubscriptionGroupInBroker(groupName, shouldCleanOffset, false);
+            }
+            isSuccess = true;
+        } catch (Throwable t) {
+            LOGGER.error("Failed to delete subscription group config ", t);
+        } finally {
+            try {
+                this.brokerController.getSubscriptionGroupManager().persist();
+            } catch (Throwable t) {
+                isSuccess = false;
+                LOGGER.error("Failed to persist subscription group config after batch delete", t);
+            }
+        }
+        response.setCode(isSuccess ? ResponseCode.SUCCESS : ResponseCode.SYSTEM_ERROR);
         response.setRemark(null);
         return response;
     }
@@ -2183,7 +2367,6 @@ public class AdminBrokerProcessor implements NettyRequestProcessor {
                 brokerController.getPopInflightMessageCounter().clearInFlightMessageNum(topic, group, entry.getKey());
             }
             if (brokerController.getBrokerConfig().isPopConsumerKVServiceEnable()) {
-                brokerController.getPopConsumerService().clearCache(group, topic, entry.getKey());
                 brokerController.getConsumerOffsetManager().clearPullOffset(group, topic);
             }
             body.getOffsetTable().put(new MessageQueue(topic, brokerName, entry.getKey()), entry.getValue());
@@ -2877,6 +3060,12 @@ public class AdminBrokerProcessor implements NettyRequestProcessor {
             selectMappedBufferResult = this.brokerController.getMessageStore()
                 .selectOneMessageByOffset(messageId.getOffset());
             MessageExt msg = MessageDecoder.decode(selectMappedBufferResult.getByteBuffer(), true, false);
+            if (!Objects.equals(requestHeader.getTopic(),
+                msg.getUserProperty(MessageConst.PROPERTY_REAL_TOPIC))) {
+                response.setCode(ResponseCode.NO_PERMISSION);
+                response.setRemark("The topic does not match the transaction message");
+                return response;
+            }
             msg.putUserProperty(MessageConst.PROPERTY_TRANSACTION_CHECK_TIMES, String.valueOf(0));
             PutMessageResult putMessageResult = this.brokerController.getMessageStore()
                 .putMessage(toMessageExtBrokerInner(msg));
@@ -3195,6 +3384,9 @@ public class AdminBrokerProcessor implements NettyRequestProcessor {
                 response.setCode(ResponseCode.SUCCESS);
                 if (user != null) {
                     UserInfo userInfo = UserConverter.convertUser(user);
+                    if (canReadUserPassword(request, requestHeader.getUsername())) {
+                        userInfo.setPassword(user.getPassword());
+                    }
                     response.setBody(JSON.toJSONString(userInfo).getBytes(StandardCharsets.UTF_8));
                 }
             })
@@ -3368,6 +3560,27 @@ public class AdminBrokerProcessor implements NettyRequestProcessor {
         }
         return !this.brokerController.getAuthenticationMetadataManager()
             .isSuperUser(accessKey).join();
+    }
+
+    private boolean canReadUserPassword(RemotingCommand request, String username) {
+        if (this.brokerController.getAuthConfig() == null
+            || !this.brokerController.getAuthConfig()
+            .isAuthenticationRequired(String.valueOf(request.getCode()))) {
+            return false;
+        }
+        String accessKey = getAccessKey(request);
+        if (StringUtils.isEmpty(accessKey)) {
+            return false;
+        }
+        if (StringUtils.equals(accessKey, username)) {
+            return true;
+        }
+        return this.brokerController.getAuthenticationMetadataManager()
+            .isSuperUser(accessKey).join();
+    }
+
+    private String getAccessKey(RemotingCommand request) {
+        return request.getExtFields() == null ? null : request.getExtFields().get("AccessKey");
     }
 
     private Void handleAuthException(RemotingCommand response, Throwable ex) {

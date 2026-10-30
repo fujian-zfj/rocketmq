@@ -23,9 +23,10 @@ import java.util.Map;
 import org.apache.rocketmq.common.attribute.Attribute;
 import org.apache.rocketmq.common.attribute.BooleanAttribute;
 import org.apache.rocketmq.common.attribute.EnumAttribute;
+import org.apache.rocketmq.common.attribute.LiteSubModel;
 import org.apache.rocketmq.common.attribute.LongRangeAttribute;
 import org.apache.rocketmq.common.attribute.StringAttribute;
-import org.apache.rocketmq.common.attribute.LiteSubModel;
+import org.apache.rocketmq.common.topic.TopicValidator;
 
 public class SubscriptionGroupAttributes {
 
@@ -40,7 +41,13 @@ public class SubscriptionGroupAttributes {
 
     public static final StringAttribute LITE_BIND_TOPIC_ATTRIBUTE = new StringAttribute(
         "lite.bind.topic",
-        true
+        true,
+        value -> {
+            TopicValidator.ValidateResult result = TopicValidator.validateTopic(value);
+            if (!result.isValid()) {
+                throw new RuntimeException(result.getRemark());
+            }
+        }
     );
 
     public static final EnumAttribute LITE_SUB_MODEL_ATTRIBUTE = new EnumAttribute(
@@ -73,12 +80,17 @@ public class SubscriptionGroupAttributes {
         2000
     );
 
-    public static final LongRangeAttribute LITE_SUB_CLIENT_MAX_EVENT_COUNT = new LongRangeAttribute(
+    public static final LongRangeAttribute LITE_SUB_CLIENT_MAX_EVENT_COUNT_ATTRIBUTE = new LongRangeAttribute(
         "lite.sub.client.max.event.cnt",
         true,
         10,
         Long.MAX_VALUE,
         400
+    );
+
+    public static final StringAttribute LITE_SUB_WILDCARD_ATTRIBUTE = new StringAttribute(
+        "lite.sub.wildcard",
+        true
     );
 
     static {
@@ -89,6 +101,7 @@ public class SubscriptionGroupAttributes {
         ALL.put(LITE_SUB_MODEL_ATTRIBUTE.getName(), LITE_SUB_MODEL_ATTRIBUTE);
         ALL.put(LITE_SUB_RESET_OFFSET_EXCLUSIVE_ATTRIBUTE.getName(), LITE_SUB_RESET_OFFSET_EXCLUSIVE_ATTRIBUTE);
         ALL.put(LITE_SUB_RESET_OFFSET_UNSUBSCRIBE_ATTRIBUTE.getName(), LITE_SUB_RESET_OFFSET_UNSUBSCRIBE_ATTRIBUTE);
-        ALL.put(LITE_SUB_CLIENT_MAX_EVENT_COUNT.getName(), LITE_SUB_CLIENT_MAX_EVENT_COUNT);
+        ALL.put(LITE_SUB_CLIENT_MAX_EVENT_COUNT_ATTRIBUTE.getName(), LITE_SUB_CLIENT_MAX_EVENT_COUNT_ATTRIBUTE);
+        ALL.put(LITE_SUB_WILDCARD_ATTRIBUTE.getName(), LITE_SUB_WILDCARD_ATTRIBUTE);
     }
 }

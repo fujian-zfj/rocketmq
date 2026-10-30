@@ -18,9 +18,10 @@
 package org.apache.rocketmq.broker.lite;
 
 import com.google.common.collect.Sets;
+import org.apache.commons.lang3.StringUtils;
+import org.apache.commons.lang3.tuple.Triple;
 import org.apache.rocketmq.broker.BrokerController;
 import org.apache.rocketmq.common.MixAll;
-import org.apache.rocketmq.common.Pair;
 import org.apache.rocketmq.common.ServiceThread;
 import org.apache.rocketmq.common.constant.LoggerName;
 import org.apache.rocketmq.common.lite.LiteUtil;
@@ -28,10 +29,14 @@ import org.apache.rocketmq.logging.org.slf4j.Logger;
 import org.apache.rocketmq.logging.org.slf4j.LoggerFactory;
 import org.apache.rocketmq.store.MessageStore;
 
+import java.util.ArrayList;
 import java.util.Collections;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.TimeUnit;
+import java.util.function.Function;
 
 import static org.apache.rocketmq.broker.offset.ConsumerOffsetManager.TOPIC_GROUP_SEPARATOR;
 
@@ -41,6 +46,7 @@ import static org.apache.rocketmq.broker.offset.ConsumerOffsetManager.TOPIC_GROU
  */
 public abstract class AbstractLiteLifecycleManager extends ServiceThread {
     private static final Logger LOGGER = LoggerFactory.getLogger(LoggerName.ROCKETMQ_POP_LITE_LOGGER_NAME);
+    static final int MAX_INVALID_SCAN_COUNT = 5;
 
     protected final BrokerController brokerController;
     protected final String brokerName;
@@ -48,6 +54,14 @@ public abstract class AbstractLiteLifecycleManager extends ServiceThread {
     protected MessageStore messageStore;
     protected Map<String, Integer> ttlMap = Collections.emptyMap();
     protected Map<String, Set<String>> subscriberGroupMap = Collections.emptyMap();
+    protected Map<String, Integer> offsetInvalidScanCountMap = new ConcurrentHashMap<>();
+    protected Map<String, Integer> storeTimeInvalidScanCountMap = new ConcurrentHashMap<>();
+
+    /**
+     * Global prefix index over lmqName, maintained on the lmq lifecycle hot path and
+     * consumed by {@link LiteEventDispatcher} wildcard full dispatch and lifecycle queries.
+     */
+    protected final LmqPrefixIndex lmqPrefixIndex = new LmqPrefixIndex();
 
     public AbstractLiteLifecycleManager(BrokerController brokerController, LiteSharding liteSharding) {
         this.brokerController = brokerController;
@@ -55,9 +69,37 @@ public abstract class AbstractLiteLifecycleManager extends ServiceThread {
         this.liteSharding = liteSharding;
     }
 
-    public void init() {
+    public boolean init() {
         this.messageStore = brokerController.getMessageStore();
         assert messageStore != null;
+        return true;
+    }
+
+    /**
+     * Populate the prefix index once at startup. Must be called after {@link #init()}.
+     */
+    public void bootstrapLmqPrefixIndex() {
+        long start = System.currentTimeMillis();
+        forEachLiteTopic(triple -> {
+            lmqPrefixIndex.add(triple.getLeft());
+            return true;
+        });
+        LOGGER.info("bootstrap lmq prefix index finish, indexed:{}, costMs:{}",
+            lmqPrefixIndex.size(), System.currentTimeMillis() - start);
+    }
+
+    /**
+     * Hook fired on the first message of a freshly created lmq.
+     */
+    public void onLmqCreate(String lmqName) {
+        lmqPrefixIndex.add(lmqName);
+    }
+
+    /**
+     * Hook fired when an lmq is deleted.
+     */
+    public void onLmqDelete(String lmqName) {
+        lmqPrefixIndex.remove(lmqName);
     }
 
     /**
@@ -66,16 +108,59 @@ public abstract class AbstractLiteLifecycleManager extends ServiceThread {
     public abstract long getMaxOffsetInQueue(String lmqName);
 
     /**
-     * Collect expired LMQ of lite topic, and also attach its parent topic name
-     * return Pair of parent topic and lmq name, not null
-     */
-    public abstract List<Pair<String, String>> collectExpiredLiteTopic();
-
-    /**
      * Collect LMQ by parent topic
      * return lmq name list, not null
      */
-    public abstract List<String> collectByParentTopic(String parentTopic);
+    public List<String> collectByParentTopic(String parentTopic) {
+        if (StringUtils.isEmpty(parentTopic)) {
+            return Collections.emptyList();
+        }
+        List<String> resultList = new ArrayList<>();
+        forEachLiteTopicByParent(parentTopic, triple -> {
+            resultList.add(triple.getLeft());
+            return true;
+        });
+        return resultList;
+    }
+
+    /**
+     * Iterator of lite topic, for high frequency iteration
+     * Triple<lmqName, maxOffsetInQueue, lastStoreTimestamp>, lastStoreTimestamp is null for now
+     * return true to continue, false to break.
+     *
+     * @param function consumer func
+     */
+    public abstract void forEachLiteTopic(Function<Triple<String, Long, Long>, Boolean> function);
+
+    /**
+     * Delegate to {@link #forEachLiteTopicByPrefix} with prefix = LITE_TOPIC_PREFIX + parentTopic + SEPARATOR.
+     *
+     * @param parentTopic parent topic to filter by
+     * @param function consumer func; caller must NOT add/remove lmqPrefixIndex inside the callback
+     */
+    public void forEachLiteTopicByParent(String parentTopic, Function<Triple<String, Long, Long>, Boolean> function) {
+        forEachLiteTopicByPrefix(LiteUtil.LITE_TOPIC_PREFIX + parentTopic + LiteUtil.SEPARATOR, function);
+    }
+
+    /**
+     * Iterator of lite topic filtered by lmqName prefix.
+     * Triple<lmqName, maxOffsetInQueue, lastStoreTimestamp>, lastStoreTimestamp is null for now.
+     * Entries with maxOffset <= 0 (no messages ever written) are skipped and will NOT be applied.
+     * Return true to continue, false to break.
+     *
+     * @param prefix lmqName prefix to filter by
+     * @param function consumer func; caller must NOT add/remove lmqPrefixIndex inside the callback
+     */
+    public void forEachLiteTopicByPrefix(String prefix, Function<Triple<String, Long, Long>, Boolean> function) {
+        lmqPrefixIndex.forEachLmqByPrefix(prefix, lmqName -> {
+            long maxOffset = getMaxOffsetInQueue(lmqName);
+            if (maxOffset <= 0) {
+                return true;
+            }
+            Triple<String, Long, Long> triple = Triple.of(lmqName, maxOffset, null);
+            return function.apply(triple);
+        });
+    }
 
     /**
      * Check if the subscription for the given LMQ is active.
@@ -91,7 +176,12 @@ public abstract class AbstractLiteLifecycleManager extends ServiceThread {
         if (!LiteMetadataUtil.isLiteMessageType(parentTopic, brokerController)) {
             return 0;
         }
-        return collectByParentTopic(parentTopic).size();
+        int[] count = {0};
+        forEachLiteTopicByParent(parentTopic, triple -> {
+            count[0]++;
+            return true;
+        });
+        return count[0];
     }
 
     public boolean isLmqExist(String lmqName) {
@@ -100,11 +190,23 @@ public abstract class AbstractLiteLifecycleManager extends ServiceThread {
 
     public void cleanExpiredLiteTopic() {
         try {
+            long startMs = System.currentTimeMillis();
             updateMetadata(); // necessary
-            List<Pair<String, String>> lmqToDelete = collectExpiredLiteTopic();
-            LOGGER.info("collect expired topic, size:{}", lmqToDelete.size());
-            lmqToDelete.forEach(pair -> deleteLmq(pair.getObject1(), pair.getObject2()));
-            if (!lmqToDelete.isEmpty()) {
+            int[] count = {0};
+            forEachLiteTopic(triple -> {
+                String lmqName = triple.getLeft();
+                String parentTopic = LiteUtil.getParentTopic(lmqName);
+                if (parentTopic == null) {
+                    return true;
+                }
+                if (isLiteTopicExpired(parentTopic, lmqName, triple.getMiddle())) {
+                    deleteLmq(parentTopic, lmqName);
+                    count[0]++;
+                }
+                return true;
+            });
+            LOGGER.info("clean expired topic, size:{}, cost:{}ms", count[0], System.currentTimeMillis() - startMs);
+            if (count[0] > 0) {
                 brokerController.getMessageStore().getQueueStore().flush();
             }
         } catch (Exception e) {
@@ -117,10 +219,16 @@ public abstract class AbstractLiteLifecycleManager extends ServiceThread {
             if (!LiteMetadataUtil.isLiteMessageType(parentTopic, brokerController)) {
                 return;
             }
+            long startMs = System.currentTimeMillis();
             updateMetadata(); // necessary
-            List<String> lmqToDelete = collectByParentTopic(parentTopic);
-            LOGGER.info("clean by parent topic, {}, size:{}", parentTopic, lmqToDelete.size());
-            lmqToDelete.forEach(lmqName -> deleteLmq(parentTopic, lmqName));
+            // collect-then-delete: forEachLiteTopicByParent and deleteLmq each hold a lock, nesting causes deadlock
+            List<String> toDelete = new ArrayList<>();
+            forEachLiteTopicByParent(parentTopic, triple -> {
+                toDelete.add(triple.getLeft());
+                return true;
+            });
+            toDelete.forEach(liteTopic -> deleteLmq(parentTopic, liteTopic));
+            LOGGER.info("clean by parent topic:{}, size:{}, cost:{}ms", parentTopic, toDelete.size(), System.currentTimeMillis() - startMs);
         } catch (Exception e) {
             LOGGER.error("cleanByParentTopic error", e);
         }
@@ -152,12 +260,19 @@ public abstract class AbstractLiteLifecycleManager extends ServiceThread {
         if (!LiteUtil.isLiteTopicQueue(lmqName)) {
             return false;
         }
-        if (maxOffset <= 0) {
-            LOGGER.warn("unexpected condition, max offset <= 0, {}, {}", lmqName, maxOffset);
-            return false;
+        int offsetInvalidCount = trackInvalidCount(lmqName, maxOffset <= 0, offsetInvalidScanCountMap);
+        if (offsetInvalidCount > 0) {
+            // check more times in case of concurrent issue
+            LOGGER.warn("unexpected condition, max offset <= 0, {}, {}, scanCount:{}", lmqName, maxOffset, offsetInvalidCount);
+            return offsetInvalidCount > MAX_INVALID_SCAN_COUNT;
         }
-        long latestStoreTime =
-            this.brokerController.getMessageStore().getMessageStoreTimeStamp(lmqName, 0, maxOffset - 1);
+        long latestStoreTime = messageStore.getMessageStoreTimeStamp(lmqName, 0, maxOffset - 1);
+        int storeTimeInvalidCount = trackInvalidCount(lmqName, latestStoreTime <= 0, storeTimeInvalidScanCountMap);
+        if (storeTimeInvalidCount > 0) {
+            // bypass TTL protection on purpose, but debounce against transient read failures
+            LOGGER.warn("latest store time <= 0, {}, {}, scanCount:{}", lmqName, latestStoreTime, storeTimeInvalidCount);
+            return storeTimeInvalidCount > MAX_INVALID_SCAN_COUNT;
+        }
         long inactiveTime = System.currentTimeMillis() - latestStoreTime;
         if (inactiveTime < brokerController.getBrokerConfig().getMinLiteTTl()) {
             return false;
@@ -173,7 +288,32 @@ public abstract class AbstractLiteLifecycleManager extends ServiceThread {
         if (hasConsumerLag(lmqName, maxOffset, latestStoreTime, parentTopic)) {
             return false;
         }
-        return inactiveTime > minutes * 60 * 1000;
+        return inactiveTime > TimeUnit.MINUTES.toMillis(minutes);
+    }
+
+    /**
+     * Track the invalid state of the given lmq: increase the count when invalid, reset when recovered.
+     * The counter is removed automatically once it exceeds {@link #MAX_INVALID_SCAN_COUNT}.
+     *
+     * @return the current invalid count, 0 means healthy (and the counter has been reset)
+     */
+    private int trackInvalidCount(String lmqName, boolean invalid, Map<String, Integer> invalidCountMap) {
+        if (!invalid) {
+            invalidCountMap.remove(lmqName);
+            return 0;
+        }
+        int invalidCount = invalidCountMap.getOrDefault(lmqName, 0) + 1;
+        if (invalidCount > MAX_INVALID_SCAN_COUNT) {
+            invalidCountMap.remove(lmqName);
+        } else {
+            invalidCountMap.put(lmqName, invalidCount);
+        }
+        return invalidCount;
+    }
+
+    private void removeInvalidCount(String lmqName) {
+        offsetInvalidScanCountMap.remove(lmqName);
+        storeTimeInvalidScanCountMap.remove(lmqName);
     }
 
     public void deleteLmq(String parentTopic, String lmqName) {
@@ -182,6 +322,7 @@ public abstract class AbstractLiteLifecycleManager extends ServiceThread {
             groups.forEach(group -> {
                 String topicAtGroup = lmqName + TOPIC_GROUP_SEPARATOR + group;
                 brokerController.getConsumerOffsetManager().getOffsetTable().remove(topicAtGroup);
+                brokerController.getConsumerOffsetManager().eraseResetOffset(lmqName, group, 0);
                 brokerController.getConsumerOffsetManager().removeConsumerOffset(topicAtGroup); // no iteration
                 brokerController.getPopLiteMessageProcessor().getConsumerOrderInfoManager().remove(lmqName, group);
             });
@@ -190,6 +331,10 @@ public abstract class AbstractLiteLifecycleManager extends ServiceThread {
             brokerController.getLiteSubscriptionRegistry().cleanSubscription(lmqName, false);
             brokerController.getConsumerOffsetManager().getPullOffsetTable().remove(
                 lmqName + TOPIC_GROUP_SEPARATOR + MixAll.TOOLS_CONSUMER_GROUP);
+            brokerController.getBrokerMetricsManager().getLiteConsumerLagCalculator()
+                .removeLagInfoByLmq(parentTopic, lmqName);
+            removeInvalidCount(lmqName);
+            onLmqDelete(lmqName);
             LOGGER.info("delete lmq finish. {}, sharding:{}", lmqName, sharding);
         } catch (Exception e) {
             LOGGER.error("delete lmq error. {}", lmqName, e);

@@ -25,11 +25,13 @@ import java.util.concurrent.ConcurrentMap;
 import java.util.concurrent.PriorityBlockingQueue;
 import org.apache.rocketmq.broker.BrokerController;
 import org.apache.rocketmq.broker.offset.ConsumerOffsetManager;
+import org.apache.rocketmq.broker.subscription.SubscriptionGroupManager;
 import org.apache.rocketmq.common.BrokerConfig;
 import org.apache.rocketmq.common.Pair;
 import org.apache.rocketmq.common.entity.TopicGroup;
 import org.apache.rocketmq.common.lite.LiteLagInfo;
 import org.apache.rocketmq.common.lite.LiteUtil;
+import org.apache.rocketmq.remoting.protocol.subscription.SubscriptionGroupConfig;
 import org.junit.Before;
 import org.junit.Test;
 import org.junit.runner.RunWith;
@@ -54,6 +56,9 @@ public class LiteConsumerLagCalculatorTest {
 
     @Mock
     private ConsumerOffsetManager consumerOffsetManager;
+
+    @Mock
+    private SubscriptionGroupManager subscriptionGroupManager;
 
     private final BrokerConfig brokerConfig = new BrokerConfig();
 
@@ -139,6 +144,41 @@ public class LiteConsumerLagCalculatorTest {
         PriorityBlockingQueue<LiteConsumerLagCalculator.LagTimeInfo> lagHeap =
             liteConsumerLagCalculator.topicGroupLagTimeMap.get(topicGroup);
         assertTrue(lagHeap.isEmpty());
+    }
+
+    @Test
+    public void testRemoveLagInfoByLmq() {
+        String group1 = "testGroup1";
+        String group2 = "testGroup2";
+        String topic = "testTopic";
+        String otherTopic = "otherTopic";
+        String lmqName = LiteUtil.toLmqName(topic, "lmq1");
+        String keepLmqName = LiteUtil.toLmqName(topic, "lmq2");
+        long storeTimestamp = System.currentTimeMillis();
+
+        // Record the same lmq under two groups, plus another lmq and another topic as controls
+        liteConsumerLagCalculator.updateLagInfo(group1, topic, lmqName, storeTimestamp);
+        liteConsumerLagCalculator.updateLagInfo(group1, topic, keepLmqName, storeTimestamp);
+        liteConsumerLagCalculator.updateLagInfo(group2, topic, lmqName, storeTimestamp);
+        liteConsumerLagCalculator.updateLagInfo(group1, otherTopic, lmqName, storeTimestamp);
+
+        // Remove the lmq for all groups bound to the topic
+        liteConsumerLagCalculator.removeLagInfoByLmq(topic, lmqName);
+
+        // Only the target lmq is removed, other lmq in the same group is kept
+        PriorityBlockingQueue<LiteConsumerLagCalculator.LagTimeInfo> group1Heap =
+            liteConsumerLagCalculator.topicGroupLagTimeMap.get(new TopicGroup(topic, group1));
+        assertEquals(1, group1Heap.size());
+        assertEquals(keepLmqName, group1Heap.peek().getLmqName());
+        // The lmq is also removed from other groups of the same topic
+        assertTrue(liteConsumerLagCalculator.topicGroupLagTimeMap.get(new TopicGroup(topic, group2)).isEmpty());
+        // Lag info under other topics is not affected
+        assertEquals(1, liteConsumerLagCalculator.topicGroupLagTimeMap.get(new TopicGroup(otherTopic, group1)).size());
+
+        // TopK by lag time no longer returns the removed lmq
+        Pair<List<LiteLagInfo>, Long> result = liteConsumerLagCalculator.getLagTimestampTopK(group2, topic, 10);
+        assertTrue(result.getObject1().isEmpty());
+        assertEquals(LiteConsumerLagCalculator.INIT_CONSUME_TIMESTAMP, result.getObject2().longValue());
     }
 
     @Test
@@ -276,10 +316,16 @@ public class LiteConsumerLagCalculatorTest {
 
         when(consumerOffsetManager.getOffsetTable()).thenReturn(offsetTable);
 
+        // Mock SubscriptionGroupManager to return liteBindTopic
+        when(brokerController.getSubscriptionGroupManager()).thenReturn(subscriptionGroupManager);
+        SubscriptionGroupConfig groupConfig = new SubscriptionGroupConfig();
+        groupConfig.setGroupName(group);
+        groupConfig.setLiteBindTopic(topic);
+        when(subscriptionGroupManager.findSubscriptionGroupConfig(group)).thenReturn(groupConfig);
+
         // Mock store timestamps
         long timestamp1 = 1000L;
         long timestamp2 = 2000L;
-        long timestamp3 = 1500L;
 
         // Create a spy of the calculator to allow partial mocking
         LiteConsumerLagCalculator spyCalculator = spy(liteConsumerLagCalculator);
@@ -287,8 +333,6 @@ public class LiteConsumerLagCalculatorTest {
         // Mock getStoreTimestamp method on the spy
         doReturn(timestamp1).when(spyCalculator).getStoreTimestamp(lmqName1, consumerOffset1);
         doReturn(timestamp2).when(spyCalculator).getStoreTimestamp(lmqName2, consumerOffset2);
-        doReturn(timestamp3).when(spyCalculator).getStoreTimestamp(lmqName3, consumerOffset3);
-
         // Mock getMaxOffset method on the spy
         doReturn(100L).when(spyCalculator).getMaxOffset(lmqName1);
         doReturn(80L).when(spyCalculator).getMaxOffset(lmqName2);

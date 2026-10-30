@@ -112,6 +112,7 @@ import org.apache.rocketmq.store.queue.ConsumeQueueInterface;
 import org.apache.rocketmq.store.queue.ConsumeQueueStore;
 import org.apache.rocketmq.store.queue.ConsumeQueueStoreInterface;
 import org.apache.rocketmq.store.queue.CqUnit;
+import org.apache.rocketmq.store.queue.MultiDispatchUtils;
 import org.apache.rocketmq.store.queue.ReferredIterator;
 import org.apache.rocketmq.store.rocksdb.MessageRocksDBStorage;
 import org.apache.rocketmq.store.stats.BrokerStatsManager;
@@ -163,8 +164,6 @@ public class DefaultMessageStore implements MessageStore {
     private final BrokerConfig brokerConfig;
 
     private volatile boolean shutdown = true;
-
-    private boolean notifyMessageArriveInBatch = false;
 
     protected StoreCheckpoint storeCheckpoint;
     private MessageRocksDBStorage messageRocksDBStorage;
@@ -1501,7 +1500,8 @@ public class DefaultMessageStore implements MessageStore {
         return queryMessageResult;
     }
 
-    @Override public CompletableFuture<QueryMessageResult> queryMessageAsync(String topic, String key,
+    @Override
+    public CompletableFuture<QueryMessageResult> queryMessageAsync(String topic, String key,
         int maxNum, long begin, long end) {
         return CompletableFuture.completedFuture(queryMessage(topic, key, maxNum, begin, end));
     }
@@ -2643,13 +2643,24 @@ public class DefaultMessageStore implements MessageStore {
 
     @Override
     public void notifyMessageArriveIfNecessary(DispatchRequest dispatchRequest) {
+        // keeps original parameters and behavior by always passing true here
+        notifyMessageArrive(dispatchRequest, true);
+    }
+
+    /**
+     * Notify message arrival, optionally including the multi-queue (LMQ) part.
+     * @param notifyMultiQueue whether to also notify the multi-queue arrival
+     */
+    private void notifyMessageArrive(DispatchRequest dispatchRequest, boolean notifyMultiQueue) {
         if (DefaultMessageStore.this.brokerConfig.isLongPollingEnable()
             && DefaultMessageStore.this.messageArrivingListener != null) {
             DefaultMessageStore.this.messageArrivingListener.arriving(dispatchRequest.getTopic(),
                 dispatchRequest.getQueueId(), dispatchRequest.getConsumeQueueOffset() + 1,
                 dispatchRequest.getTagsCode(), dispatchRequest.getStoreTimestamp(),
                 dispatchRequest.getBitMap(), dispatchRequest.getPropertiesMap());
-            DefaultMessageStore.this.reputMessageService.notifyMessageArrive4MultiQueue(dispatchRequest);
+            if (notifyMultiQueue) {
+                DefaultMessageStore.this.reputMessageService.notifyMessageArrive4MultiQueue(dispatchRequest);
+            }
         }
     }
 
@@ -2745,8 +2756,11 @@ public class DefaultMessageStore implements MessageStore {
                                 currentReputTimestamp = dispatchRequest.getStoreTimestamp();
                                 DefaultMessageStore.this.doDispatch(dispatchRequest);
 
-                                if (!notifyMessageArriveInBatch) {
-                                    notifyMessageArriveIfNecessary(dispatchRequest);
+                                if (isNotifyMessageArriveWhenReput()) {
+                                    // only notify multi-queue when we do real LMQ dispatch action.
+                                    boolean notifyMultiQueue = MultiDispatchUtils.checkMultiDispatchQueue(
+                                        DefaultMessageStore.this.messageStoreConfig, dispatchRequest);
+                                    notifyMessageArrive(dispatchRequest, notifyMultiQueue);
                                 }
 
                                 this.reputFromOffset += size;
@@ -2930,7 +2944,9 @@ public class DefaultMessageStore implements MessageStore {
                     for (DispatchRequest dispatchRequest : dispatchRequests) {
                         DefaultMessageStore.this.doDispatch(dispatchRequest);
                         // wake up long-polling
-                        DefaultMessageStore.this.notifyMessageArriveIfNecessary(dispatchRequest);
+                        boolean notifyMultiQueue = MultiDispatchUtils.checkMultiDispatchQueue(
+                            DefaultMessageStore.this.messageStoreConfig, dispatchRequest);
+                        notifyMessageArrive(dispatchRequest, notifyMultiQueue);
 
                         if (!DefaultMessageStore.this.getMessageStoreConfig().isDuplicationEnable() &&
                             DefaultMessageStore.this.getMessageStoreConfig().getBrokerRole() == BrokerRole.SLAVE) {
@@ -3185,12 +3201,19 @@ public class DefaultMessageStore implements MessageStore {
             return 0;
         }
 
-        // correct the "from" argument to min offset in queue if it is too small
+        // shift the range to min offset if it is too small, then clamp it to the current queue bounds
         long minOffset = consumeQueue.getMinOffsetInQueue();
+        long maxOffset = consumeQueue.getMaxOffsetInQueue();
         if (from < minOffset) {
             long diff = to - from;
             from = minOffset;
-            to = from + diff;
+            to = diff > maxOffset - from ? maxOffset : from + diff;
+        }
+
+        from = Math.min(from, maxOffset);
+        to = Math.min(to, maxOffset);
+        if (from >= to) {
+            return 0;
         }
 
         long msgCount = consumeQueue.estimateMessageCount(from, to, filter);
@@ -3205,6 +3228,30 @@ public class DefaultMessageStore implements MessageStore {
     @Override
     public void initMetrics(Meter meter, Supplier<AttributesBuilder> attributesBuilderSupplier) {
         this.defaultStoreMetricsManager.init(meter, attributesBuilderSupplier, this);
+    }
+
+    /**
+     * Decide whether long-polling consumers should be notified during reput.
+     * <p>
+     * Notification is only safe when the consume queue is updated synchronously in the reput dispatch:
+     * <ul>
+     *     <li>a plain file-based {@link ConsumeQueueStore}, which is always written synchronously;</li>
+     *     <li>a {@link CombineConsumeQueueStore} with selective double-write enabled, where the
+     *     file-based store acts as both the assign-offset and read store and is written
+     *     synchronously, while RocksDB CQ is built asynchronously for only part of the topics.</li>
+     * </ul>
+     * In other cases (e.g. reading from RocksDB CQ) the notification is handled by
+     * {@code RocksGroupCommitService} after the CQ is committed, so we can skip it here.
+     */
+    public boolean isNotifyMessageArriveWhenReput() {
+        if (consumeQueueStore instanceof ConsumeQueueStore) {
+            return true;
+        }
+        if (consumeQueueStore instanceof CombineConsumeQueueStore
+            && messageStoreConfig.isRocksdbCQSelectiveDoubleWriteEnable()) {
+            return true;
+        }
+        return false;
     }
 
     /**
@@ -3246,14 +3293,6 @@ public class DefaultMessageStore implements MessageStore {
     @Override
     public MessageRocksDBStorage getMessageRocksDBStorage() {
         return this.messageRocksDBStorage;
-    }
-
-    public boolean isNotifyMessageArriveInBatch() {
-        return notifyMessageArriveInBatch;
-    }
-
-    public void setNotifyMessageArriveInBatch(boolean notifyMessageArriveInBatch) {
-        this.notifyMessageArriveInBatch = notifyMessageArriveInBatch;
     }
 
     public DefaultStoreMetricsManager getDefaultStoreMetricsManager() {

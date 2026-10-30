@@ -42,7 +42,7 @@ import org.apache.rocketmq.store.GetMessageResult;
 
 public class QueueLevelConsumerManager extends ConfigManager implements ConsumerOrderInfoManager {
 
-    private static final Logger log = LoggerFactory.getLogger(LoggerName.BROKER_LOGGER_NAME);
+    protected static final Logger log = LoggerFactory.getLogger(LoggerName.BROKER_LOGGER_NAME);
     private static final String TOPIC_GROUP_SEPARATOR = "@";
     private static final long CLEAN_SPAN_FROM_LAST = 24 * 3600 * 1000;
 
@@ -172,6 +172,20 @@ public class QueueLevelConsumerManager extends ConfigManager implements Consumer
     }
 
     @Override
+    public boolean isAttemptIdMatched(String attemptId, String topic, String group) {
+        ConcurrentHashMap<Integer/*queueId*/, OrderInfo> qs = table.get(buildKey(topic, group));
+        if (qs == null || attemptId == null) {
+            return false;
+        }
+        for (OrderInfo orderInfo : qs.values()) {
+            if (orderInfo != null && attemptId.equals(orderInfo.getAttemptId())) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    @Override
     public void clearBlock(String topic, String group, int queueId) {
         table.computeIfPresent(buildKey(topic, group), (key, val) -> {
             val.remove(queueId);
@@ -291,8 +305,7 @@ public class QueueLevelConsumerManager extends ConfigManager implements Consumer
         updateLockFreeTimestamp(topic, group, queueId, orderInfo);
     }
 
-    @VisibleForTesting
-    protected void autoClean() {
+    public void autoClean() {
         if (brokerController == null) {
             return;
         }

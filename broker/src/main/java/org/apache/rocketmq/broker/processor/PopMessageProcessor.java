@@ -78,7 +78,6 @@ import org.apache.rocketmq.store.pop.BatchAckMsg;
 import org.apache.rocketmq.store.pop.PopCheckPoint;
 
 import java.nio.ByteBuffer;
-import java.nio.charset.StandardCharsets;
 import java.util.Iterator;
 import java.util.List;
 import java.util.Map;
@@ -172,11 +171,6 @@ public class PopMessageProcessor implements NettyRequestProcessor {
             + PopAckConstants.SPLIT + ck.getPopTime()
             + PopAckConstants.SPLIT + ck.getBrokerName()
             + PopAckConstants.SPLIT + PopAckConstants.CK_TAG;
-    }
-
-    @Override
-    public boolean rejectRequest() {
-        return false;
     }
 
     public Cache<String, ConcurrentSkipListSet<PopRequest>> getPollingMap() {
@@ -942,7 +936,7 @@ public class PopMessageProcessor implements NettyRequestProcessor {
         MessageExtBrokerInner msgInner = new MessageExtBrokerInner();
 
         msgInner.setTopic(reviveTopic);
-        msgInner.setBody(JSON.toJSONString(ck).getBytes(StandardCharsets.UTF_8));
+        msgInner.setBody(JSON.toJSONBytes(ck));
         msgInner.setQueueId(reviveQid);
         msgInner.setTags(PopAckConstants.CK_TAG);
         msgInner.setBornTimestamp(System.currentTimeMillis());

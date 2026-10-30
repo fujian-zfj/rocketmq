@@ -78,7 +78,6 @@ import java.util.HashMap;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
-import java.util.Random;
 import java.util.Set;
 import java.util.concurrent.ArrayBlockingQueue;
 import java.util.concurrent.CompletableFuture;
@@ -86,6 +85,7 @@ import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ConcurrentMap;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
+import java.util.concurrent.ThreadLocalRandom;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicReference;
@@ -180,8 +180,7 @@ public class NettyRemotingClient extends NettyRemotingAbstract implements Remoti
     }
 
     private static int initValueIndex() {
-        Random r = new Random();
-        return r.nextInt(999);
+        return ThreadLocalRandom.current().nextInt(999);
     }
 
     private void loadSocksProxyJson() {
@@ -243,7 +242,9 @@ public class NettyRemotingClient extends NettyRemotingAbstract implements Remoti
             handler.option(ChannelOption.ALLOCATOR, PooledByteBufAllocator.DEFAULT);
         }
 
-        nettyEventExecutor.start();
+        if (channelEventListener != null) {
+            nettyEventExecutor.start();
+        }
 
         TimerTask timerTaskScanResponseTable = new TimerTask() {
             @Override
@@ -435,7 +436,7 @@ public class NettyRemotingClient extends NettyRemotingAbstract implements Remoti
                     if (null == prevCW) {
                         LOGGER.info("closeChannel: the channel[addr={}, id={}] has been removed from the channel table before", addrRemote, channel.id());
                         removeItemFromTable = false;
-                    } else if (prevCW.isWrapperOf(channel)) {
+                    } else if (!prevCW.isWrapperOf(channel)) {
                         LOGGER.info("closeChannel: the channel[addr={}, id={}] has been closed before, and has been created again, nothing to do.",
                             addrRemote, channel.id());
                         removeItemFromTable = false;
@@ -1086,16 +1087,25 @@ public class NettyRemotingClient extends NettyRemotingAbstract implements Remoti
         }
 
         public void close() {
+            // Snapshot the channels under the read lock, then close them without holding
+            // any wrapper lock. Holding the wrapper lock across closeChannel would take
+            // lockChannelTables while inside the wrapper lock, which inverts the
+            // lockChannelTables -> wrapper lock order used by createChannelAsync and
+            // closeChannel (via tryClose).
+            ChannelFuture current;
+            ChannelFuture toClose;
+            lock.readLock().lock();
             try {
-                lock.writeLock().lock();
-                if (channelFuture != null) {
-                    closeChannel(channelFuture.channel());
-                }
-                if (channelToClose != null) {
-                    closeChannel(channelToClose.channel());
-                }
+                current = this.channelFuture;
+                toClose = this.channelToClose;
             } finally {
-                lock.writeLock().unlock();
+                lock.readLock().unlock();
+            }
+            if (current != null) {
+                closeChannel(channelAddress, current.channel());
+            }
+            if (toClose != null) {
+                closeChannel(channelAddress, toClose.channel());
             }
         }
     }

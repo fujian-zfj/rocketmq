@@ -396,7 +396,7 @@ public class BrokerController {
         this.authorizationMetadataManager = AuthorizationFactory.getMetadataManager(this.authConfig);
         this.topicRouteInfoManager = new TopicRouteInfoManager(this);
         this.liteSharding = new LiteShardingImpl(this, this.topicRouteInfoManager);
-        this.liteLifecycleManager = this.messageStoreConfig.isEnableRocksDBStore() ?
+        this.liteLifecycleManager = this.messageStoreConfig.isEnableRocksDBStore() || this.messageStoreConfig.isRocksdbCQDoubleWriteEnable() ?
             new RocksDBLiteLifecycleManager(this, this.liteSharding) : new LiteLifecycleManager(this, this.liteSharding);
         this.liteSubscriptionRegistry = new LiteSubscriptionRegistryImpl(this, liteLifecycleManager);
         this.liteSubscriptionCtlProcessor = new LiteSubscriptionCtlProcessor(this, liteSubscriptionRegistry);
@@ -951,6 +951,8 @@ public class BrokerController {
         //scheduleMessageService load after messageStore load success
         result = result && this.scheduleMessageService.load();
 
+        result = result && initLiteService();
+
         for (BrokerAttachedPlugin brokerAttachedPlugin : brokerAttachedPlugins) {
             if (brokerAttachedPlugin != null) {
                 result = result && brokerAttachedPlugin.load();
@@ -974,8 +976,6 @@ public class BrokerController {
             initialRpcHooks();
 
             initialRequestPipeline();
-
-            initLiteService();
 
             if (TlsSystemConfig.tlsMode != TlsMode.DISABLED) {
                 // Register a listener to reload SslContext
@@ -1153,9 +1153,13 @@ public class BrokerController {
         }
     }
 
-    private void initLiteService() {
+    private boolean initLiteService() {
         this.liteEventDispatcher.init();
-        this.liteLifecycleManager.init();
+        if (!this.liteLifecycleManager.init()) {
+            return false;
+        }
+        this.liteLifecycleManager.bootstrapLmqPrefixIndex();
+        return true;
     }
 
     public void registerProcessor() {
@@ -1558,6 +1562,7 @@ public class BrokerController {
             if (this.popLiteMessageProcessor.getPopLiteLongPollingService() != null) {
                 this.popLiteMessageProcessor.getPopLiteLongPollingService().shutdown();
             }
+            this.popLiteMessageProcessor.getConsumerOrderInfoManager().shutdown();
         }
 
         if (this.popMessageProcessor.getQueueLockManager() != null) {
@@ -1594,6 +1599,7 @@ public class BrokerController {
 
         if (this.notificationProcessor != null) {
             this.notificationProcessor.getPopLongPollingService().shutdown();
+            this.notificationProcessor.getPopLiteLongPollingService().shutdown();
         }
 
         if (this.consumerIdsChangeListener != null) {
@@ -1890,6 +1896,7 @@ public class BrokerController {
 
         if (this.notificationProcessor != null) {
             this.notificationProcessor.getPopLongPollingService().start();
+            this.notificationProcessor.getPopLiteLongPollingService().start();
         }
 
         if (this.popConsumerService != null) {
@@ -2762,10 +2769,6 @@ public class BrokerController {
 
     public boolean isIsolated() {
         return this.isIsolated;
-    }
-
-    public TimerCheckpoint getTimerCheckpoint() {
-        return timerCheckpoint;
     }
 
     public TopicRouteInfoManager getTopicRouteInfoManager() {

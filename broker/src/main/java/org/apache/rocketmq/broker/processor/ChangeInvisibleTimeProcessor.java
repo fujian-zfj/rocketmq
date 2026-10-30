@@ -19,12 +19,12 @@ package org.apache.rocketmq.broker.processor;
 import com.alibaba.fastjson2.JSON;
 import io.netty.channel.Channel;
 import io.netty.channel.ChannelHandlerContext;
-import java.nio.charset.StandardCharsets;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.TimeUnit;
 import org.apache.commons.lang3.StringUtils;
 import org.apache.rocketmq.broker.BrokerController;
 import org.apache.rocketmq.broker.offset.ConsumerOffsetManager;
+import org.apache.rocketmq.broker.offset.MemoryConsumerOrderInfoManager;
 import org.apache.rocketmq.broker.pop.PopConsumerLockService;
 import org.apache.rocketmq.broker.pop.orderly.ConsumerOrderInfoManager;
 import org.apache.rocketmq.common.PopAckConstants;
@@ -65,11 +65,6 @@ public class ChangeInvisibleTimeProcessor implements NettyRequestProcessor {
     public RemotingCommand processRequest(final ChannelHandlerContext ctx,
         RemotingCommand request) throws RemotingCommandException {
         return this.processRequest(ctx.channel(), request, true);
-    }
-
-    @Override
-    public boolean rejectRequest() {
-        return false;
     }
 
     private RemotingCommand processRequest(final Channel channel, RemotingCommand request,
@@ -282,7 +277,7 @@ public class ChangeInvisibleTimeProcessor implements NettyRequestProcessor {
         }
 
         msgInner.setTopic(reviveTopic);
-        msgInner.setBody(JSON.toJSONString(ackMsg).getBytes(StandardCharsets.UTF_8));
+        msgInner.setBody(JSON.toJSONBytes(ackMsg));
         msgInner.setQueueId(rqId);
         msgInner.setTags(PopAckConstants.ACK_TAG);
         msgInner.setBornTimestamp(System.currentTimeMillis());
@@ -326,7 +321,7 @@ public class ChangeInvisibleTimeProcessor implements NettyRequestProcessor {
         ck.setBrokerName(ExtraInfoUtil.getBrokerName(extraInfo));
         ck.setSuspend(requestHeader.isSuspend());
 
-        msgInner.setBody(JSON.toJSONString(ck).getBytes(StandardCharsets.UTF_8));
+        msgInner.setBody(JSON.toJSONBytes(ck));
         msgInner.setQueueId(reviveQid);
         msgInner.setTags(PopAckConstants.CK_TAG);
         msgInner.setBornTimestamp(System.currentTimeMillis());
@@ -382,8 +377,8 @@ public class ChangeInvisibleTimeProcessor implements NettyRequestProcessor {
         long popTime = ExtraInfoUtil.getPopTime(extraInfo);
 
         ConsumerOffsetManager consumerOffsetManager = this.brokerController.getConsumerOffsetManager();
-        ConsumerOrderInfoManager consumerOrderInfoManager =
-            brokerController.getPopLiteMessageProcessor().getConsumerOrderInfoManager();
+        MemoryConsumerOrderInfoManager consumerOrderInfoManager =
+            (MemoryConsumerOrderInfoManager) brokerController.getPopLiteMessageProcessor().getConsumerOrderInfoManager();
         PopConsumerLockService consumerLockService = this.brokerController.getPopLiteMessageProcessor().getLockService();
 
         long oldOffset = consumerOffsetManager.queryOffset(group, lmqName, 0);
@@ -400,9 +395,12 @@ public class ChangeInvisibleTimeProcessor implements NettyRequestProcessor {
                 return CompletableFuture.completedFuture(response);
             }
             long visibilityTimeout = System.currentTimeMillis() + requestHeader.getInvisibleTime();
-            consumerOrderInfoManager.updateNextVisibleTime(
-                lmqName, group, 0, requestHeader.getOffset(), popTime, visibilityTimeout);
-
+            if (requestHeader.isSuspend()) {
+                consumerOrderInfoManager.suspendQueue(lmqName, group, 0, popTime, visibilityTimeout);
+            } else {
+                consumerOrderInfoManager.updateNextVisibleTime(
+                    lmqName, group, 0, requestHeader.getOffset(), popTime, visibilityTimeout);
+            }
             responseHeader.setInvisibleTime(visibilityTimeout - popTime);
             responseHeader.setPopTime(popTime);
             responseHeader.setReviveQid(ExtraInfoUtil.getReviveQid(extraInfo));

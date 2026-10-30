@@ -54,7 +54,7 @@ import org.apache.rocketmq.tools.command.broker.SendMsgStatusCommand;
 import org.apache.rocketmq.tools.command.broker.SwitchTimerEngineSubCommand;
 import org.apache.rocketmq.tools.command.broker.UpdateBrokerConfigSubCommand;
 import org.apache.rocketmq.tools.command.broker.UpdateColdDataFlowCtrGroupConfigSubCommand;
-import org.apache.rocketmq.tools.command.cluster.CLusterSendMsgRTCommand;
+import org.apache.rocketmq.tools.command.cluster.ClusterSendMsgRTCommand;
 import org.apache.rocketmq.tools.command.cluster.ClusterListSubCommand;
 import org.apache.rocketmq.tools.command.connection.ConsumerConnectionSubCommand;
 import org.apache.rocketmq.tools.command.connection.ProducerConnectionSubCommand;
@@ -113,6 +113,7 @@ import org.apache.rocketmq.tools.command.queue.QueryConsumeQueueCommand;
 import org.apache.rocketmq.tools.command.stats.StatsAllSubCommand;
 import org.apache.rocketmq.tools.command.topic.AllocateMQSubCommand;
 import org.apache.rocketmq.tools.command.topic.DeleteTopicSubCommand;
+import org.apache.rocketmq.tools.command.topic.GetTopicConfigSubCommand;
 import org.apache.rocketmq.tools.command.topic.RemappingStaticTopicSubCommand;
 import org.apache.rocketmq.tools.command.topic.TopicClusterSubCommand;
 import org.apache.rocketmq.tools.command.topic.TopicListSubCommand;
@@ -252,12 +253,13 @@ public class MQAdminStartup {
         initCommand(new AllocateMQSubCommand());
 
         initCommand(new CheckMsgSendRTCommand());
-        initCommand(new CLusterSendMsgRTCommand());
+        initCommand(new ClusterSendMsgRTCommand());
 
         initCommand(new GetNamesrvConfigCommand());
         initCommand(new UpdateNamesrvConfigCommand());
         initCommand(new GetBrokerConfigCommand());
         initCommand(new GetConsumerConfigSubCommand());
+        initCommand(new GetTopicConfigSubCommand());
 
         initCommand(new QueryConsumeQueueCommand());
         initCommand(new SendMessageCommand());

@@ -223,7 +223,10 @@ public class TimerMessageStore {
         bufferLocal = new ThreadLocal<ByteBuffer>() {
             @Override
             protected ByteBuffer initialValue() {
-                return ByteBuffer.allocateDirect(storeConfig.getMaxMessageSize() + 100);
+                int maxMessageBodySize = storeConfig.getMaxMessageSize();
+                int maxMessageSize = Integer.MAX_VALUE - maxMessageBodySize >= 64 * 1024 ?
+                        maxMessageBodySize + 64 * 1024 : Integer.MAX_VALUE;
+                return ByteBuffer.allocateDirect(maxMessageSize);
             }
         };
 
@@ -526,6 +529,9 @@ public class TimerMessageStore {
             public void run() {
                 try {
                     if (storeConfig.isTimerEnableCheckMetrics()) {
+                        if (storeConfig.isTimerStopEnqueue()) {
+                            return;
+                        }
                         String when = storeConfig.getTimerCheckMetricsWhen();
                         if (!UtilAll.isItTimeToDo(when)) {
                             return;
@@ -1245,7 +1251,6 @@ public class TimerMessageStore {
         long tagsCodeValue =
             MessageExtBrokerInner.tagsString2tagsCode(topicFilterType, msgInner.getTags());
         msgInner.setTagsCode(tagsCodeValue);
-        msgInner.setPropertiesString(MessageDecoder.messageProperties2String(msgExt.getProperties()));
 
         msgInner.setSysFlag(msgExt.getSysFlag());
         msgInner.setBornTimestamp(msgExt.getBornTimestamp());
@@ -1264,6 +1269,9 @@ public class TimerMessageStore {
             MessageAccessor.clearProperty(msgInner, MessageConst.PROPERTY_REAL_TOPIC);
             MessageAccessor.clearProperty(msgInner, MessageConst.PROPERTY_REAL_QUEUE_ID);
         }
+        // Encode after the properties are finalized so that the wire data stays consistent
+        // with the property map, aligning with TimerMessageRocksDBStore#convertMessage.
+        msgInner.setPropertiesString(MessageDecoder.messageProperties2String(msgInner.getProperties()));
         return msgInner;
     }
 
